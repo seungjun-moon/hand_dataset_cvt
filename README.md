@@ -1,0 +1,79 @@
+# Hand Dataset Converter
+
+Convert hand pose datasets (e.g., [DexYCB](https://dex-ycb.github.io/)) into a unified egodex-compatible format with HDF5 annotations and MP4 videos.
+
+## Output Format
+
+Each converted sequence produces a directory containing:
+- `0.hdf5` — Camera intrinsics, per-frame 4×4 SE(3) transforms, and confidence scores for all joints
+- `0.mp4` — RGB video from the selected camera
+
+### HDF5 Structure
+
+```
+camera/
+    intrinsic          (3, 3)
+transforms/
+    camera             (N, 4, 4)
+    leftHand           (N, 4, 4)
+    rightIndexFingerTip (N, 4, 4)
+    ...
+confidences/
+    leftHand           (N,)
+    rightIndexFingerTip (N,)
+    ...
+```
+
+Joint names follow the egodex convention: `{side}{Joint}` (e.g., `rightThumbKnuckle`, `leftMiddleFingerTip`). Body joints (hip, shoulders, spine, etc.) are included with zero confidence.
+
+## Setup
+
+```bash
+pip install numpy opencv-python h5py pyyaml
+```
+
+## Usage
+
+### DexYCB → Egodex
+
+Place the DexYCB dataset under `datasets/dex_ycb/`, then run:
+
+```bash
+python scripts/convert_dex_ycb.py
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--src` | `datasets/dex_ycb` | Source DexYCB directory |
+| `--dst` | `datasets/dex_ycb_cvt` | Output directory |
+| `--camera-idx` | `0` | Camera index to extract |
+| `--fps` | `30.0` | Output video frame rate |
+
+### DexYCB Source Structure
+
+```
+datasets/dex_ycb/
+    {date}-{subject}/
+        {timestamp}/
+            meta.yml
+            {camera_serial}/
+                color_XXXXXX.jpg
+                labels_XXXXXX.npz
+        calibration/
+            intrinsics/{serial}_640x480.yml
+            extrinsics_{name}/extrinsics.yml
+```
+
+## Project Structure
+
+```
+├── scripts/
+│   └── convert_dex_ycb.py      # Main conversion script
+├── utils/
+│   ├── io.py                   # File I/O (YAML, HDF5, video encoding)
+│   ├── joint_mapping.py        # MANO ↔ egodex joint name mapping
+│   └── transforms.py           # 3D joint → SE(3) transform computation
+└── datasets/                   # Raw & converted data (git-ignored)
+```
