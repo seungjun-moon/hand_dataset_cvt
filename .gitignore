@@ -1,0 +1,18 @@
+# NFS temp files
+.nfs*
+
+# Raw datasets
+datasets/dex_ycb/
+datasets/egodex/
+datasets/dex_ycb_cvt/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# Environment
+.env
+.venv/
