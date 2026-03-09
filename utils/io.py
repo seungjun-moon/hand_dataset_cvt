@@ -69,14 +69,17 @@ def images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0):
 
 
 def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
-                      transforms_dict: dict, confidences_dict: dict):
+                      transforms_dict: dict, transforms_cam_dict: dict,
+                      confidences_dict: dict, gravity: np.ndarray):
     """Write an egodex-format HDF5 file.
 
     Args:
         output_path: Path to write the HDF5 file.
         intrinsic: (3, 3) camera intrinsic matrix.
-        transforms_dict: {joint_name: (N, 4, 4) array}
+        transforms_dict: {joint_name: (N, 4, 4) array} world-space transforms.
+        transforms_cam_dict: {joint_name: (N, 4, 4) array} camera-space transforms.
         confidences_dict: {joint_name: (N,) array}
+        gravity: (3, 3) gravity alignment rotation.
     """
     with h5py.File(output_path, "w") as f:
         cam_grp = f.create_group("camera")
@@ -84,9 +87,15 @@ def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
 
         tf_grp = f.create_group("transforms")
         conf_grp = f.create_group("confidences")
+        tf_cam_grp = f.create_group("transforms_cam")
 
         for name, data in transforms_dict.items():
             tf_grp.create_dataset(name, data=data.astype(np.float32))
+
+        tf_grp.create_dataset("gravity", data=gravity.astype(np.float32))
+
+        for name, data in transforms_cam_dict.items():
+            tf_cam_grp.create_dataset(name, data=data.astype(np.float32))
 
         for name, data in confidences_dict.items():
             conf_grp.create_dataset(name, data=data.astype(np.float32))

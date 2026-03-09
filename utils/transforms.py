@@ -82,8 +82,26 @@ def make_transform(position: np.ndarray, direction: np.ndarray) -> np.ndarray:
 
 
 def extrinsics_tuple_to_4x4(vals: tuple) -> np.ndarray:
-    """Convert DexYCB extrinsics (12-element tuple: 3x3 rot + 3 trans) to 4x4."""
+    """Convert DexYCB extrinsics (12-element tuple: 3x4 row-major [R|t]) to 4x4."""
+    M = np.array(vals, dtype=np.float32).reshape(3, 4)
     T = np.eye(4, dtype=np.float32)
-    T[:3, :3] = np.array(vals[:9], dtype=np.float32).reshape(3, 3)
-    T[:3, 3] = np.array(vals[9:12], dtype=np.float32)
+    T[:3, :3] = M[:, :3]
+    T[:3, 3] = M[:, 3]
     return T
+
+
+def invert_rigid(T: np.ndarray) -> np.ndarray:
+    """Invert a rigid (SE3) 4x4 transform efficiently."""
+    T_inv = np.eye(4, dtype=np.float32)
+    R = T[:3, :3]
+    t = T[:3, 3]
+    T_inv[:3, :3] = R.T
+    T_inv[:3, 3] = -R.T @ t
+    return T_inv
+
+
+def apply_transform(T: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Apply a 4x4 transform to (N, 3) points."""
+    R = T[:3, :3]
+    t = T[:3, 3]
+    return (R @ points.T).T + t
