@@ -20,23 +20,28 @@ Egodex structure:
     datasets/dex_ycb_cvt/
         {idx}_{subject}_{seq}/
             0.hdf5  (camera/intrinsic, transforms/*, transforms_cam/*, confidences/*)
-            0.mp4
+            0.mp4   (color video, valid frames only)
+            0_depth.mp4  (colorized depth video, valid frames only)
 
 Usage:
-    python scripts/convert_dex_ycb.py [--src datasets/dex_ycb] [--dst datasets/dex_ycb_cvt]
-                                      [--camera-idx 0] [--fps 30] [--max-samples 0]
+    python scripts/convert_dex_ycb.py --src datasets/dex_ycb --dst datasets/dex_ycb_cvt_cam_000
+    --camera-idx 0 --fps 30 --max-samples 5
 """
 
 import argparse
 import os
 import sys
 
+import cv2
+import h5py
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from utils.io import (
     collect_color_paths,
+    collect_depth_paths,
+    depth_images_to_mp4,
     images_to_mp4,
     load_extrinsics,
     load_frame_labels,
@@ -57,14 +62,6 @@ from utils.transforms import (
 )
 
 
-def _transform_joint_to_world(T_cam_joint: np.ndarray, cam_pose: np.ndarray) -> np.ndarray:
-    """Transform a (N, 4, 4) camera-space transform to world-space.
-
-    world_joint = cam_pose @ cam_joint for each frame.
-    """
-    return np.einsum("ij,njk->nik", cam_pose, T_cam_joint)
-
-
 def build_egodex_data_for_sequence(
     camera_dir: str,
     meta: dict,
@@ -77,12 +74,15 @@ def build_egodex_data_for_sequence(
     DexYCB joint_3d is in camera coordinates. The extrinsic maps world->camera,
     so inv(extrinsic) = camera pose in world.
 
+    Invalid frames (missing labels or joint_3d == -1) are filtered out entirely.
+
     Returns:
         intrinsic: (3, 3) array
-        transforms_dict: {joint_name: (N, 4, 4)} world-space
-        transforms_cam_dict: {joint_name: (N, 4, 4)} camera-space
-        confidences_dict: {joint_name: (N,)}
+        transforms_dict: {joint_name: (M, 4, 4)} world-space (M = valid frames)
+        transforms_cam_dict: {joint_name: (M, 4, 4)} camera-space
+        confidences_dict: {joint_name: (M,)}
         gravity: (3, 3) gravity alignment rotation
+        valid_indices: (M,) original frame indices that are valid
     """
     intrinsic = load_intrinsics(calibration_dir, serial)
     extrinsic = load_extrinsics(calibration_dir, meta["extrinsics"], serial)
@@ -98,20 +98,6 @@ def build_egodex_data_for_sequence(
     confidences_dict = {}
 
     identity = np.eye(4, dtype=np.float32)
-
-    # Camera transform in world space (static)
-    cam_tf = np.tile(cam_pose, (num_frames, 1, 1))
-    transforms_dict["camera"] = cam_tf
-
-    # Gravity: use the camera pose rotation as gravity alignment
-    # (assumes the reference camera frame is roughly gravity-aligned)
-    gravity = cam_pose[:3, :3].copy()
-
-    # Body joints: not available in DexYCB
-    for name in BODY_JOINTS:
-        transforms_dict[name] = np.tile(identity, (num_frames, 1, 1))
-        transforms_cam_dict[name] = np.tile(identity, (num_frames, 1, 1))
-        confidences_dict[name] = np.zeros(num_frames, dtype=np.float32)
 
     # Collect per-frame joint_3d (in camera coordinates)
     all_joint_3d_cam = np.zeros((num_frames, 21, 3), dtype=np.float32)
@@ -130,23 +116,34 @@ def build_egodex_data_for_sequence(
         all_joint_3d_cam[frame_i] = j3d
         frame_valid[frame_i] = True
 
+    # Filter to valid frames only
+    valid_indices = np.where(frame_valid)[0]
+    M = len(valid_indices)
+    joint_3d_valid = all_joint_3d_cam[valid_indices]  # (M, 21, 3)
+
     # Convert camera-space joint positions to 4x4 transforms
-    all_transforms_cam = np.zeros((num_frames, 21, 4, 4), dtype=np.float32)
-    for i in range(num_frames):
-        if frame_valid[i]:
-            all_transforms_cam[i] = joints_to_transforms(all_joint_3d_cam[i])
-        else:
-            all_transforms_cam[i] = np.tile(identity, (21, 1, 1))
+    all_transforms_cam = np.zeros((M, 21, 4, 4), dtype=np.float32)
+    for i in range(M):
+        all_transforms_cam[i] = joints_to_transforms(joint_3d_valid[i])
 
     # Convert to world-space transforms: T_world = cam_pose @ T_cam
-    all_transforms_world = np.zeros_like(all_transforms_cam)
-    for i in range(num_frames):
-        if frame_valid[i]:
-            all_transforms_world[i] = cam_pose @ all_transforms_cam[i]
-        else:
-            all_transforms_world[i] = np.tile(identity, (21, 1, 1))
+    all_transforms_world = cam_pose @ all_transforms_cam  # broadcast (4,4) @ (M,21,4,4)
 
-    conf = frame_valid.astype(np.float32)
+    # Camera transform in world space (static, repeated for valid frames)
+    cam_tf = np.tile(cam_pose, (M, 1, 1))
+    transforms_dict["camera"] = cam_tf
+
+    # Gravity: use the camera pose rotation as gravity alignment
+    gravity = cam_pose[:3, :3].copy()
+
+    # Body joints: not available in DexYCB
+    for name in BODY_JOINTS:
+        transforms_dict[name] = np.tile(identity, (M, 1, 1))
+        transforms_cam_dict[name] = np.tile(identity, (M, 1, 1))
+        confidences_dict[name] = np.zeros(M, dtype=np.float32)
+
+    # All valid frames have confidence 1.0
+    conf = np.ones(M, dtype=np.float32)
 
     # Assign to each hand side
     for side in ["left", "right"]:
@@ -159,33 +156,56 @@ def build_egodex_data_for_sequence(
                 transforms_dict[name] = all_transforms_world[:, mano_idx]
                 confidences_dict[name] = conf.copy()
             else:
-                transforms_cam_dict[name] = np.tile(identity, (num_frames, 1, 1))
-                transforms_dict[name] = np.tile(identity, (num_frames, 1, 1))
-                confidences_dict[name] = np.zeros(num_frames, dtype=np.float32)
+                transforms_cam_dict[name] = np.tile(identity, (M, 1, 1))
+                transforms_dict[name] = np.tile(identity, (M, 1, 1))
+                confidences_dict[name] = np.zeros(M, dtype=np.float32)
 
         for suffix, (idx_a, idx_b) in METACARPAL_INTERPOLATION.items():
             name = f"{side}{suffix}"
             if is_active:
-                mc_cam = np.zeros((num_frames, 4, 4), dtype=np.float32)
-                mc_world = np.zeros((num_frames, 4, 4), dtype=np.float32)
-                for i in range(num_frames):
-                    if frame_valid[i]:
-                        pos = interpolate_joint(all_joint_3d_cam[i], idx_a, idx_b, alpha=0.3)
-                        direction = all_joint_3d_cam[i, idx_b] - all_joint_3d_cam[i, idx_a]
-                        mc_cam[i] = make_transform(pos, direction)
-                        mc_world[i] = cam_pose @ mc_cam[i]
-                    else:
-                        mc_cam[i] = identity
-                        mc_world[i] = identity
+                mc_cam = np.zeros((M, 4, 4), dtype=np.float32)
+                mc_world = np.zeros((M, 4, 4), dtype=np.float32)
+                for i in range(M):
+                    pos = interpolate_joint(joint_3d_valid[i], idx_a, idx_b, alpha=0.3)
+                    direction = joint_3d_valid[i, idx_b] - joint_3d_valid[i, idx_a]
+                    mc_cam[i] = make_transform(pos, direction)
+                    mc_world[i] = cam_pose @ mc_cam[i]
                 transforms_cam_dict[name] = mc_cam
                 transforms_dict[name] = mc_world
                 confidences_dict[name] = conf.copy()
             else:
-                transforms_cam_dict[name] = np.tile(identity, (num_frames, 1, 1))
-                transforms_dict[name] = np.tile(identity, (num_frames, 1, 1))
-                confidences_dict[name] = np.zeros(num_frames, dtype=np.float32)
+                transforms_cam_dict[name] = np.tile(identity, (M, 1, 1))
+                transforms_dict[name] = np.tile(identity, (M, 1, 1))
+                confidences_dict[name] = np.zeros(M, dtype=np.float32)
 
-    return intrinsic, transforms_dict, transforms_cam_dict, confidences_dict, gravity
+    return intrinsic, transforms_dict, transforms_cam_dict, confidences_dict, gravity, valid_indices
+
+
+def _verify_output(out_dir: str, expected_frames: int):
+    """Verify the converted output: check HDF5 frame counts and video frame counts."""
+    hdf5_path = os.path.join(out_dir, "0.hdf5")
+    with h5py.File(hdf5_path, "r") as f:
+        # Check a sample transform has expected frame count
+        sample_key = list(f["transforms"].keys())[0]
+        if sample_key == "gravity":
+            sample_key = list(f["transforms"].keys())[1]
+        hdf5_frames = f[f"transforms/{sample_key}"].shape[0]
+        if hdf5_frames != expected_frames:
+            print(f"  WARNING: HDF5 has {hdf5_frames} frames, expected {expected_frames}")
+
+    for video_name in ["0.mp4", "0_depth.mp4"]:
+        video_path = os.path.join(out_dir, video_name)
+        if not os.path.exists(video_path):
+            print(f"  WARNING: {video_name} not created")
+            continue
+        cap = cv2.VideoCapture(video_path)
+        video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        if video_frames != expected_frames:
+            print(f"  WARNING: {video_name} has {video_frames} frames, expected {expected_frames}")
+        else:
+            size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            print(f"  OK: {video_name} ({video_frames} frames, {size_mb:.1f} MB)")
 
 
 def convert_dex_ycb(src_dir: str, dst_dir: str, camera_idx: int = 0,
@@ -236,20 +256,39 @@ def convert_dex_ycb(src_dir: str, dst_dir: str, camera_idx: int = 0,
             out_dir = os.path.join(dst_dir, out_name)
             os.makedirs(out_dir, exist_ok=True)
 
-            print(f"[{global_idx:06d}] {subject_dir_name}/{seq_name} (camera={serial}, frames={num_frames})")
-
-            intrinsic, transforms_dict, transforms_cam_dict, confidences_dict, gravity = \
+            intrinsic, transforms_dict, transforms_cam_dict, confidences_dict, gravity, valid_indices = \
                 build_egodex_data_for_sequence(
                     camera_dir, meta, calibration_dir, serial, num_frames,
                 )
+
+            n_valid = len(valid_indices)
+            print(f"[{global_idx:06d}] {subject_dir_name}/{seq_name} "
+                  f"(camera={serial}, frames={num_frames}, valid={n_valid})")
+
+            if n_valid == 0:
+                print(f"  Skipping: no valid frames")
+                continue
 
             hdf5_path = os.path.join(out_dir, "0.hdf5")
             write_egodex_hdf5(hdf5_path, intrinsic, transforms_dict,
                               transforms_cam_dict, confidences_dict, gravity)
 
-            color_paths = collect_color_paths(camera_dir)
+            # Color video (valid frames only)
+            all_color_paths = collect_color_paths(camera_dir)
+            valid_color_paths = [all_color_paths[i] for i in valid_indices
+                                 if i < len(all_color_paths)]
             mp4_path = os.path.join(out_dir, "0.mp4")
-            images_to_mp4(color_paths, mp4_path, fps=fps)
+            images_to_mp4(valid_color_paths, mp4_path, fps=fps)
+
+            # Depth video (valid frames only)
+            all_depth_paths = collect_depth_paths(camera_dir)
+            valid_depth_paths = [all_depth_paths[i] for i in valid_indices
+                                 if i < len(all_depth_paths)]
+            depth_mp4_path = os.path.join(out_dir, "0_depth.mp4")
+            depth_images_to_mp4(valid_depth_paths, depth_mp4_path, fps=fps)
+
+            # Verify: check frame counts match
+            _verify_output(out_dir, n_valid)
 
             global_idx += 1
 

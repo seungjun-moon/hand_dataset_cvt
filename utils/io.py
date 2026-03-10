@@ -54,18 +54,77 @@ def collect_color_paths(camera_dir: str) -> list:
     return paths
 
 
+def collect_depth_paths(camera_dir: str) -> list:
+    """Return sorted list of aligned depth image paths in a camera directory."""
+    paths = sorted(glob.glob(os.path.join(camera_dir, "aligned_depth_to_color_*.png")))
+    return paths
+
+
+def _pipe_frames_to_ffmpeg(frames_iter, output_path: str, fps: float,
+                           width: int, height: int):
+    """Pipe raw BGR frames to ffmpeg via stdin."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{width}x{height}",
+        "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "18",
+        output_path,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    for frame in frames_iter:
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().decode()
+        raise RuntimeError(f"ffmpeg failed for {output_path}: {err}")
+
+
 def images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0):
-    """Encode a list of image paths into an mp4 video using OpenCV."""
+    """Encode a list of image paths into an mp4 video using ffmpeg."""
     if not image_paths:
         return
     first = cv2.imread(image_paths[0])
     h, w = first.shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
-    for p in image_paths:
-        frame = cv2.imread(p)
-        writer.write(frame)
-    writer.release()
+
+    def frames():
+        for p in image_paths:
+            yield cv2.imread(p)
+
+    _pipe_frames_to_ffmpeg(frames(), output_path, fps, w, h)
+
+
+def depth_images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0,
+                        max_depth_mm: float = 2000.0):
+    """Encode 16-bit depth PNGs into a colorized mp4 video using ffmpeg.
+
+    Depth values are clipped to [0, max_depth_mm], normalized to [0, 255],
+    and colorized with COLORMAP_JET for visualization.
+    """
+    if not image_paths:
+        return
+    first = cv2.imread(image_paths[0], cv2.IMREAD_UNCHANGED)
+    h, w = first.shape[:2]
+
+    def frames():
+        for p in image_paths:
+            depth = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+            if depth is None:
+                continue
+            depth_clipped = np.clip(depth.astype(np.float32), 0, max_depth_mm)
+            depth_norm = (depth_clipped / max_depth_mm * 255).astype(np.uint8)
+            colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
+            colored[depth == 0] = 0
+            yield colored
+
+    _pipe_frames_to_ffmpeg(frames(), output_path, fps, w, h)
 
 
 def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
