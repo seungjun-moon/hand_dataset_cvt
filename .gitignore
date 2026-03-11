@@ -1,10 +1,14 @@
 # NFS temp files
 .nfs*
 
-# Raw datasets
-datasets/dex_ycb/
-datasets/egodex/
-datasets/dex_ycb_cvt/
+# Raw downloads
+RAW/
+
+# Source datasets
+DATASET/
+
+# Converted datasets
+CONVERTED/
 
 # Python
 __pycache__/

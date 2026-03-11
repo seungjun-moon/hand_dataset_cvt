@@ -2,7 +2,7 @@
 """Convert DexYCB dataset into egodex format.
 
 DexYCB structure:
-    datasets/dex_ycb/
+    DATASET/dex_ycb/
         {date}-{subject}/
             {timestamp}/
                 meta.yml
@@ -17,14 +17,14 @@ DexYCB structure:
             mano_{name}/
 
 Egodex structure:
-    datasets/dex_ycb_cvt/
+    CONVERTED/dex_ycb/
         {idx}_{subject}_{seq}/
             0.hdf5  (camera/intrinsic, transforms/*, transforms_cam/*, confidences/*)
             0.mp4   (color video, valid frames only)
             0_depth.mp4  (colorized depth video, valid frames only)
 
 Usage:
-    python scripts/convert_dex_ycb.py --src datasets/dex_ycb --dst datasets/dex_ycb_cvt_cam_000
+    python scripts/convert_dex_ycb.py --src DATASET/dex_ycb --dst CONVERTED/dex_ycb
     --camera-idx 0 --fps 30 --max-samples 5
 """
 
@@ -300,8 +300,8 @@ def convert_dex_ycb(src_dir: str, dst_dir: str, camera_idx: int = 0,
 
 def main():
     parser = argparse.ArgumentParser(description="Convert DexYCB to egodex format")
-    parser.add_argument("--src", default="datasets/dex_ycb", help="DexYCB source directory")
-    parser.add_argument("--dst", default="datasets/dex_ycb_cvt", help="Output directory")
+    parser.add_argument("--src", default="DATASET/dex_ycb", help="DexYCB source directory")
+    parser.add_argument("--dst", default="CONVERTED/dex_ycb", help="Output directory")
     parser.add_argument("--camera-idx", type=int, default=0, help="Which camera index to use (default: 0)")
     parser.add_argument("--fps", type=float, default=30.0, help="Video FPS (default: 30)")
     parser.add_argument("--max-samples", type=int, default=0, help="Max sequences to convert (0=all)")

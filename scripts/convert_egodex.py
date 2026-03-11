@@ -4,18 +4,27 @@
 ARKit coordinate system: +X right, +Y up, -Z forward
 Target coordinate system: +X right, +Y forward, +Z up
 
-Conversion (90-degree rotation around X-axis):
-    Camera c2w:  T_world @ arkit_c2w
-    3D points:   R_world @ points
-    transforms_cam: inv(camera_c2w) @ joint_world  (per frame)
+Source structure (RAW):
+    RAW/egodex/
+        {part}/
+            {task_name}/
+                {N}.hdf5
+                {N}.mp4
+
+Output structure (CONVERTED):
+    CONVERTED/egodex/
+        {idx:06d}_{task_name}/
+            0.hdf5  (transforms/ in Z-up, transforms_cam/, confidences/, camera/)
+            0.mp4
 
 Usage:
-    python scripts/convert_egodex.py --src datasets/egodex --dst datasets/egodex_cvt
+    python scripts/convert_egodex.py --src RAW/egodex --dst CONVERTED/egodex
 """
 
 import argparse
 import glob
 import os
+import re
 import shutil
 import sys
 
@@ -33,8 +42,6 @@ T_WORLD = np.array([
     [0,  1,  0,  0],
     [0,  0,  0,  1],
 ], dtype=np.float32)
-
-R_WORLD = T_WORLD[:3, :3]
 
 
 def convert_hdf5(src_path: str, dst_path: str):
@@ -89,71 +96,99 @@ def convert_hdf5(src_path: str, dst_path: str):
             conf_grp.create_dataset(name, data=data.astype(np.float32))
 
 
-def convert_egodex(src_dir: str, dst_dir: str, inplace: bool = False):
-    """Convert all egodex sequences from ARKit coords to +Z up."""
-    if inplace:
-        dst_dir = src_dir
+def collect_hdf5_pairs(src_dir: str):
+    """Collect all (hdf5_path, mp4_path, task_name) tuples across all parts.
 
-    seq_dirs = sorted([
+    Scans src_dir for part directories containing task subdirectories,
+    each with numbered .hdf5/.mp4 pairs.
+
+    Returns sorted list of (hdf5_path, mp4_path_or_None, task_name).
+    """
+    pairs = []
+
+    # Detect structure: either src_dir/{part}/{task}/{N}.hdf5
+    # or src_dir/{task}/{N}.hdf5 (single-level)
+    subdirs = sorted([
         d for d in os.listdir(src_dir)
         if os.path.isdir(os.path.join(src_dir, d))
     ])
 
-    if not seq_dirs:
-        print(f"No sequences found in {src_dir}")
+    for subdir in subdirs:
+        subdir_path = os.path.join(src_dir, subdir)
+        # Check if this is a part directory (contains task subdirs)
+        # or a task directory (contains .hdf5 files directly)
+        hdf5_in_subdir = glob.glob(os.path.join(subdir_path, "*.hdf5"))
+        if hdf5_in_subdir:
+            # Single-level: src_dir/{task}/{N}.hdf5
+            _collect_task_pairs(subdir_path, subdir, pairs)
+        else:
+            # Two-level: src_dir/{part}/{task}/{N}.hdf5
+            task_dirs = sorted([
+                d for d in os.listdir(subdir_path)
+                if os.path.isdir(os.path.join(subdir_path, d))
+            ])
+            for task_name in task_dirs:
+                task_path = os.path.join(subdir_path, task_name)
+                _collect_task_pairs(task_path, task_name, pairs)
+
+    return pairs
+
+
+def _collect_task_pairs(task_path: str, task_name: str, pairs: list):
+    """Collect hdf5/mp4 pairs from a single task directory."""
+    hdf5_files = sorted(glob.glob(os.path.join(task_path, "*.hdf5")))
+    for hdf5_path in hdf5_files:
+        stem = os.path.splitext(os.path.basename(hdf5_path))[0]
+        mp4_path = os.path.join(task_path, f"{stem}.mp4")
+        if not os.path.exists(mp4_path):
+            mp4_path = None
+        pairs.append((hdf5_path, mp4_path, task_name))
+
+
+def convert_egodex(src_dir: str, dst_dir: str, max_samples: int = 0):
+    """Convert all egodex sequences from ARKit coords to +Z up."""
+    pairs = collect_hdf5_pairs(src_dir)
+
+    if not pairs:
+        print(f"No HDF5 files found in {src_dir}")
         return
 
-    if not inplace:
-        os.makedirs(dst_dir, exist_ok=True)
+    os.makedirs(dst_dir, exist_ok=True)
 
-    for i, seq_name in enumerate(seq_dirs):
-        src_seq = os.path.join(src_dir, seq_name)
-        dst_seq = os.path.join(dst_dir, seq_name)
+    for idx, (hdf5_src, mp4_src, task_name) in enumerate(pairs):
+        if max_samples > 0 and idx >= max_samples:
+            break
 
-        hdf5_files = sorted(glob.glob(os.path.join(src_seq, "*.hdf5")))
-        if not hdf5_files:
-            print(f"  Skipping {seq_name}: no .hdf5 files")
-            continue
+        out_name = f"{idx:06d}_{task_name}"
+        out_dir = os.path.join(dst_dir, out_name)
+        os.makedirs(out_dir, exist_ok=True)
 
-        if not inplace:
-            os.makedirs(dst_seq, exist_ok=True)
+        hdf5_dst = os.path.join(out_dir, "0.hdf5")
+        convert_hdf5(hdf5_src, hdf5_dst)
 
-        for hdf5_src in hdf5_files:
-            basename = os.path.basename(hdf5_src)
-            stem = os.path.splitext(basename)[0]
+        if mp4_src is not None:
+            mp4_dst = os.path.join(out_dir, "0.mp4")
+            shutil.copy2(mp4_src, mp4_dst)
 
-            if inplace:
-                hdf5_tmp = hdf5_src + ".tmp"
-                convert_hdf5(hdf5_src, hdf5_tmp)
-                os.replace(hdf5_tmp, hdf5_src)
-            else:
-                hdf5_dst = os.path.join(dst_seq, basename)
-                convert_hdf5(hdf5_src, hdf5_dst)
+        print(f"[{idx:06d}] {task_name} <- {os.path.basename(hdf5_src)}")
 
-                # Copy matching mp4 if it exists
-                mp4_src = os.path.join(src_seq, f"{stem}.mp4")
-                mp4_dst = os.path.join(dst_seq, f"{stem}.mp4")
-                if os.path.exists(mp4_src) and not os.path.exists(mp4_dst):
-                    shutil.copy2(mp4_src, mp4_dst)
-
-        print(f"[{i:04d}] {seq_name}")
-
-    print(f"\nDone. Converted {len(seq_dirs)} sequences -> {dst_dir}")
+    total = min(len(pairs), max_samples) if max_samples > 0 else len(pairs)
+    print(f"\nDone. Converted {total} sequences -> {dst_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Convert egodex datasets from ARKit coords to +Z up"
     )
-    parser.add_argument("--src", default="datasets/egodex",
-                        help="Source egodex directory (default: datasets/egodex)")
-    parser.add_argument("--dst", default="datasets/egodex_cvt",
-                        help="Output directory (default: datasets/egodex_cvt)")
-    parser.add_argument("--inplace", action="store_true",
-                        help="Convert in-place (overwrite source files)")
+    parser.add_argument("--src", default="RAW/egodex",
+                        help="Source egodex directory (default: RAW/egodex)")
+    parser.add_argument("--dst", default="CONVERTED/egodex",
+                        help="Output directory (default: CONVERTED/egodex)")
+    parser.add_argument("--max-samples", type=int, default=0,
+                        help="Max sequences to convert (0=all)")
     args = parser.parse_args()
 
-    convert_egodex(args.src, args.dst, inplace=args.inplace)
+    convert_egodex(args.src, args.dst, max_samples=args.max_samples)
 
 
 if __name__ == "__main__":
