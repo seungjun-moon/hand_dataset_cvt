@@ -66,11 +66,30 @@ datasets/dex_ycb/
             extrinsics_{name}/extrinsics.yml
 ```
 
+### EgoDex Coordinate Conversion
+
+Convert EgoDex datasets from ARKit coordinates (+Y up) to +Z up:
+
+```bash
+python scripts/convert_egodex.py
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--src` | `datasets/egodex` | Source egodex directory |
+| `--dst` | `datasets/egodex_cvt` | Output directory |
+| `--inplace` | — | Convert in-place (overwrite source files) |
+
+The script applies a world-frame rotation to all transforms, computes camera-space transforms (`transforms_cam/`), and copies associated MP4 files alongside converted HDF5 outputs.
+
 ## Project Structure
 
 ```
 ├── scripts/
-│   └── convert_dex_ycb.py      # Main conversion script
+│   ├── convert_dex_ycb.py      # DexYCB → egodex conversion
+│   └── convert_egodex.py       # EgoDex ARKit → +Z up conversion
 ├── utils/
 │   ├── io.py                   # File I/O (YAML, HDF5, video encoding)
 │   ├── joint_mapping.py        # MANO ↔ egodex joint name mapping
