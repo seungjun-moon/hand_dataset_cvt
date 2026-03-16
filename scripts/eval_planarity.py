@@ -18,6 +18,8 @@ import sys
 import h5py
 import numpy as np
 
+from tqdm import tqdm
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Finger joint suffixes in egodex convention (Knuckle=MCP, IntBase=PIP, IntTip=DIP, Tip)
@@ -48,6 +50,23 @@ def planarity_error(points: np.ndarray, normalize: bool = False) -> float:
             return 0.0
         return err / length
     return err
+
+# def bending_purity_error(points: np.ndarray) -> float:
+def planarity_error(points: np.ndarray, normalize: bool = False) -> float:
+    # 1. 중심화 및 SVD
+    centered = points - points.mean(axis=0, keepdims=True)
+    _, s, _ = np.linalg.svd(centered)
+    
+    # s[0]: 길이, s[1]: 굽힘(Bending), s[2]: 비틀림(Torsion)
+    sigma_1, sigma_2, sigma_3 = s[0], s[1], s[2]
+    
+    # 만약 손가락이 거의 일직선이라 s[1]이 너무 작으면 판별 불가
+    if sigma_2 < 1e-8:
+        return 0.0 
+    
+    # 굽힘 방향(s1) 대비 비틀림 방향(s2)의 비율
+    # 이 값이 작을수록 "한 축으로만 예쁘게 휘었다"는 뜻
+    return sigma_3 / sigma_2
 
 def finger_length(points):
     """Sum of bone segment lengths."""
@@ -88,6 +107,10 @@ def eval_sequence(hdf5_path, normalize=False):
 
                 # Load positions: (N, 3) for each of 4 joints
                 positions = [extract_positions(tf_group[name][:]) for name in joint_names]
+
+                # for idx in range(len(positions)):
+                #     positions[idx] = positions[idx][1:-1]
+
                 N = positions[0].shape[0]
 
                 errors = np.zeros(N, dtype=np.float32)
@@ -119,7 +142,7 @@ def eval_dataset(src_dir, normalize=False, max_samples=0):
         if max_samples > 0 and n_seqs >= max_samples:
             break
 
-        hdf5_files = sorted(glob.glob(os.path.join(src_dir, seq_name, "*.hdf5")))
+        hdf5_files = sorted(glob.glob(os.path.join(src_dir, seq_name, "*_00.hdf5"))) # global keypoints are same anywhere.
         if not hdf5_files:
             continue
 

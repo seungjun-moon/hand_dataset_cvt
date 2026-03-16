@@ -1,0 +1,3 @@
+[submodule "thirdparty/MoGe"]
+	path = thirdparty/MoGe
+	url = git@github.com:RLWRLD/MoGe.git

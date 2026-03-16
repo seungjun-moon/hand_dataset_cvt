@@ -4,9 +4,12 @@ Convert hand pose datasets (e.g., [DexYCB](https://dex-ycb.github.io/)) into a u
 
 ## Output Format
 
-Each converted sequence produces a directory containing:
-- `0.hdf5` — Camera intrinsics, per-frame 4×4 SE(3) transforms, and confidence scores for all joints
-- `0.mp4` — RGB video from the selected camera
+Converted datasets are organized by cluster (e.g., grasped object). Each sequence produces files named `{seq_idx:06d}_{type}_{cam_idx:02d}.{ext}`:
+
+- `000000_label_00.hdf5` — Camera intrinsics, per-frame 4×4 SE(3) transforms, and confidence scores
+- `000000_video_00.mp4` — RGB video
+
+Multi-view is supported via the camera index suffix (`_00`, `_01`, ...).
 
 ### HDF5 Structure
 
@@ -48,8 +51,9 @@ Options:
 |------|---------|-------------|
 | `--src` | `DATASET/dex_ycb` | Source DexYCB directory |
 | `--dst` | `CONVERTED/dex_ycb` | Output directory |
-| `--camera-idx` | `0` | Camera index to extract |
+| `--cameras` | all | Camera indices to extract (default: all) |
 | `--fps` | `30.0` | Output video frame rate |
+| `--max-samples` | `0` | Max sequences to convert (0=all) |
 
 ### DexYCB Source Structure
 

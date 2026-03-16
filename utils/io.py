@@ -101,44 +101,66 @@ def images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0):
     _pipe_frames_to_ffmpeg(frames(), output_path, fps, w, h)
 
 
-def depth_images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0,
-                        max_depth_mm: float = 2000.0):
-    """Encode 16-bit depth PNGs into a colorized mp4 video using ffmpeg.
+def depth_images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0):
+    """Encode 16-bit depth PNGs into a lossless metric-depth mp4.
 
-    Depth values are clipped to [0, max_depth_mm], normalized to [0, 255],
-    and colorized with COLORMAP_JET for visualization.
+    Depth values (uint16 millimeters) are packed into two channels of a BGR
+    frame: B = high byte, G = low byte, R = 0. Encoded with libx264rgb CRF 0
+    (mathematically lossless).
+
+    To decode: depth_mm = B.astype(uint16) * 256 + G.astype(uint16)
+               depth_m  = depth_mm / 1000.0
     """
     if not image_paths:
         return
     first = cv2.imread(image_paths[0], cv2.IMREAD_UNCHANGED)
     h, w = first.shape[:2]
 
-    def frames():
-        for p in image_paths:
-            depth = cv2.imread(p, cv2.IMREAD_UNCHANGED)
-            if depth is None:
-                continue
-            depth_clipped = np.clip(depth.astype(np.float32), 0, max_depth_mm)
-            depth_norm = (depth_clipped / max_depth_mm * 255).astype(np.uint8)
-            colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_JET)
-            colored[depth == 0] = 0
-            yield colored
-
-    _pipe_frames_to_ffmpeg(frames(), output_path, fps, w, h)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}",
+        "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264rgb",
+        "-crf", "0",
+        "-pix_fmt", "bgr24",
+        output_path,
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    for p in image_paths:
+        depth = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+        if depth is None:
+            continue
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        frame[:, :, 0] = (depth >> 8).astype(np.uint8)    # B = high byte
+        frame[:, :, 1] = (depth & 0xFF).astype(np.uint8)  # G = low byte
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().decode()
+        raise RuntimeError(f"ffmpeg failed for {output_path}: {err}")
 
 
 def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
-                      transforms_dict: dict, transforms_cam_dict: dict,
-                      confidences_dict: dict, gravity: np.ndarray):
+                      transforms_dict: dict, confidences_dict: dict,
+                      mano_dict: dict = None):
     """Write an egodex-format HDF5 file.
 
     Args:
         output_path: Path to write the HDF5 file.
         intrinsic: (3, 3) camera intrinsic matrix.
         transforms_dict: {joint_name: (N, 4, 4) array} world-space transforms.
-        transforms_cam_dict: {joint_name: (N, 4, 4) array} camera-space transforms.
         confidences_dict: {joint_name: (N,) array}
-        gravity: (3, 3) gravity alignment rotation.
+        mano_dict: Optional dict with MANO parameters.
+            Expected keys: 'betas' (10,), 'global_orient_worldspace' (N, 3, 3),
+            'hand_pose' (N, 15, 3, 3), 'transl_worldspace' (N, 3),
+            'kpt3d' (N, 21, 3), 'side' str.
+            Stored as mano_{side}/ group (e.g. mano_right/, mano_left/).
     """
     with h5py.File(output_path, "w") as f:
         cam_grp = f.create_group("camera")
@@ -146,15 +168,22 @@ def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
 
         tf_grp = f.create_group("transforms")
         conf_grp = f.create_group("confidences")
-        tf_cam_grp = f.create_group("transforms_cam")
 
         for name, data in transforms_dict.items():
             tf_grp.create_dataset(name, data=data.astype(np.float32))
 
-        tf_grp.create_dataset("gravity", data=gravity.astype(np.float32))
-
-        for name, data in transforms_cam_dict.items():
-            tf_cam_grp.create_dataset(name, data=data.astype(np.float32))
-
         for name, data in confidences_dict.items():
             conf_grp.create_dataset(name, data=data.astype(np.float32))
+
+        if mano_dict is not None:
+            side = mano_dict["side"]
+            grp = f.create_group(f"mano_{side}")
+            grp.create_dataset("betas", data=mano_dict["betas"].astype(np.float32))
+            grp.create_dataset("global_orient_worldspace",
+                               data=mano_dict["global_orient_worldspace"].astype(np.float32))
+            grp.create_dataset("hand_pose",
+                               data=mano_dict["hand_pose"].astype(np.float32))
+            grp.create_dataset("transl_worldspace",
+                               data=mano_dict["transl_worldspace"].astype(np.float32))
+            grp.create_dataset("kpt3d",
+                               data=mano_dict["kpt3d"].astype(np.float32))

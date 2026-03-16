@@ -9,6 +9,13 @@ DATASET/
 
 # Converted datasets
 CONVERTED/
+CROPPED/
+
+# Logs
+logs/
+
+# Claude Code
+.claude/
 
 # Python
 __pycache__/
