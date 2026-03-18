@@ -41,39 +41,36 @@ Multi-view is supported via the camera index suffix (`_00`, `_01`, ...). DexYCB 
 Each `_label_XX.hdf5` file contains:
 
 ```
-camera/
-    intrinsic                       (3, 3) float32    # Pinhole camera matrix [fx,0,cx; 0,fy,cy; 0,0,1]
-
-transforms/
-    camera                          (N, 4, 4) float32 # Camera-to-world SE(3) pose (identity for WHIM)
-    {side}Hand                      (N, 4, 4) float32 # Wrist transform
-    {side}ThumbKnuckle              (N, 4, 4) float32
-    {side}ThumbIntermediateBase     (N, 4, 4) float32
-    {side}ThumbIntermediateTip      (N, 4, 4) float32
-    {side}ThumbTip                  (N, 4, 4) float32
-    {side}IndexFingerKnuckle        (N, 4, 4) float32
-    {side}IndexFingerIntermediateBase (N, 4, 4) float32
-    {side}IndexFingerIntermediateTip  (N, 4, 4) float32
-    {side}IndexFingerTip            (N, 4, 4) float32
-    {side}MiddleFinger...           ...                # Same pattern for Middle, Ring, Little
-    {side}IndexFingerMetacarpal     (N, 4, 4) float32 # Interpolated (alpha=0.3 between wrist and MCP)
-    {side}MiddleFingerMetacarpal    ...
-    {side}RingFingerMetacarpal      ...
-    {side}LittleFingerMetacarpal    ...
-    hip                             (N, 4, 4) float32 # Body joints (identity, zero confidence)
-    leftShoulder, leftArm, ...      ...
-    spine1 .. spine7, neck1 .. neck4 ...
-
-confidences/
-    {side}Hand                      (N,) float32      # 1.0 if active, 0.0 if inactive
-    ...                                                # Same keys as transforms/ (except camera)
-
-mano_{side}/                                           # Optional, present when MANO data available
-    betas                           (10,) float32      # Shape parameters
-    global_orient_worldspace        (N, 3, 3) float32  # Global rotation matrices (world space)
-    hand_pose                       (N, 15, 3, 3) float32  # Per-joint rotation matrices
-    transl_worldspace               (N, 3) float32     # Translation (world space)
-    kpt3d                           (N, 21, 3) float32 # 3D keypoints (world space)
+├── camera/
+│   └── intrinsic                          (3, 3) float32      # [fx,0,cx; 0,fy,cy; 0,0,1]
+├── transforms/
+│   ├── camera                             (N, 4, 4) float32   # Camera-to-world pose (identity for WHIM)
+│   ├── {side}Hand                         (N, 4, 4) float32   # Wrist
+│   ├── {side}ThumbKnuckle                 (N, 4, 4) float32
+│   ├── {side}ThumbIntermediateBase        (N, 4, 4) float32
+│   ├── {side}ThumbIntermediateTip         (N, 4, 4) float32
+│   ├── {side}ThumbTip                     (N, 4, 4) float32
+│   ├── {side}IndexFingerKnuckle           (N, 4, 4) float32
+│   ├── {side}IndexFingerIntermediateBase  (N, 4, 4) float32
+│   ├── {side}IndexFingerIntermediateTip   (N, 4, 4) float32
+│   ├── {side}IndexFingerTip              (N, 4, 4) float32
+│   ├── {side}MiddleFinger...              ...                  # Same for Middle, Ring, Little
+│   ├── {side}IndexFingerMetacarpal        (N, 4, 4) float32   # Interpolated (wrist-MCP, alpha=0.3)
+│   ├── {side}MiddleFingerMetacarpal       (N, 4, 4) float32
+│   ├── {side}RingFingerMetacarpal         (N, 4, 4) float32
+│   ├── {side}LittleFingerMetacarpal       (N, 4, 4) float32
+│   ├── hip                                (N, 4, 4) float32   # Body joints (identity, zero confidence)
+│   ├── leftShoulder, leftArm, ...         ...
+│   └── spine1..spine7, neck1..neck4       ...
+├── confidences/
+│   ├── {side}Hand                         (N,) float32        # 1.0 if active, 0.0 if inactive
+│   └── ...                                                     # Same keys as transforms/ (except camera)
+└── mano_{side}/                                                # Optional, when MANO data available
+    ├── betas                              (10,) float32        # Shape parameters
+    ├── global_orient_worldspace           (N, 3, 3) float32    # Global rotation matrices
+    ├── hand_pose                          (N, 15, 3, 3) float32 # Per-joint rotation matrices
+    ├── transl_worldspace                  (N, 3) float32       # Translation (world space)
+    └── kpt3d                              (N, 21, 3) float32   # 3D keypoints (world space)
 ```
 
 Where:
