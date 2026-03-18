@@ -74,37 +74,58 @@ def save_completed(path: str, completed: set):
         json.dump(sorted(completed), f, indent=2)
 
 
-def download_video(video_id: str, video_info: dict, output_dir: str) -> str:
-    """Download a YouTube video. Returns path to downloaded file."""
-    from pytubefix import YouTube
+def download_video(video_id: str, video_info: dict, output_dir: str,
+                    timeout: int = 60) -> str:
+    """Download a YouTube video with timeout. Returns path to downloaded file."""
+    import multiprocessing
 
     out_path = os.path.join(output_dir, f"{video_id}.mp4")
     if os.path.exists(out_path):
         return out_path
 
     os.makedirs(output_dir, exist_ok=True)
-    res = video_info["res"][0]
 
-    yt = YouTube(f"https://youtu.be/{video_id}")
-    # Try H.264 at target resolution first
-    stream = yt.streams.filter(
-        only_video=True, file_extension="mp4",
-        video_codec="avc1", res=f"{res}p",
-    ).first()
-    # Fall back to any H.264 stream
-    if stream is None:
-        stream = yt.streams.filter(
-            only_video=True, file_extension="mp4", video_codec="avc1",
-        ).order_by("resolution").desc().first()
-    # Fall back to any MP4 stream
-    if stream is None:
+    def _download(video_id, video_info, output_dir, out_path):
+        from pytubefix import YouTube
+        res = video_info["res"][0]
+        yt = YouTube(f"https://youtu.be/{video_id}")
         stream = yt.streams.filter(
             only_video=True, file_extension="mp4",
-        ).order_by("resolution").desc().first()
-    if stream is None:
-        raise RuntimeError(f"No suitable stream found for {video_id}")
+            video_codec="avc1", res=f"{res}p",
+        ).first()
+        if stream is None:
+            stream = yt.streams.filter(
+                only_video=True, file_extension="mp4", video_codec="avc1",
+            ).order_by("resolution").desc().first()
+        if stream is None:
+            stream = yt.streams.filter(
+                only_video=True, file_extension="mp4",
+            ).order_by("resolution").desc().first()
+        if stream is None:
+            raise RuntimeError(f"No suitable stream found for {video_id}")
+        stream.download(output_path=output_dir, filename=f"{video_id}.mp4")
 
-    stream.download(output_path=output_dir, filename=f"{video_id}.mp4")
+    proc = multiprocessing.Process(
+        target=_download, args=(video_id, video_info, output_dir, out_path))
+    proc.start()
+    proc.join(timeout=timeout)
+
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+        # Clean up partial download
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        raise RuntimeError(f"Download timed out after {timeout}s")
+
+    if proc.exitcode != 0:
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        raise RuntimeError(f"Download process failed (exit code {proc.exitcode})")
+
+    if not os.path.exists(out_path):
+        raise RuntimeError(f"Download completed but file not found")
+
     return out_path
 
 
@@ -314,31 +335,38 @@ def extract_frames_to_mp4(
     video_path: str, output_path: str,
     frame_numbers: list, fps_rate: int, fps: float,
 ):
-    """Extract specific frames from video and encode as mp4."""
+    """Extract specific frames from video and encode as mp4.
+
+    Reads sequentially through the video and picks annotated frames,
+    avoiding costly random seeks.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  WARNING: cannot open {video_path}")
         return False
 
     # Read first frame to get dimensions
-    frame_idx = frame_numbers[0] * fps_rate
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_numbers[0] * fps_rate)
     ok, first = cap.read()
     if not ok:
         cap.release()
         return False
     h, w = first.shape[:2]
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # Build set of target video frame indices
+    target_indices = {fn * fps_rate for fn in frame_numbers}
+    max_target = max(target_indices)
 
     def frames():
-        for frame_num in frame_numbers:
-            idx = frame_num * fps_rate
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        idx = 0
+        while idx <= max_target:
             ret, img = cap.read()
-            if ret and img is not None:
-                yield img
-            else:
-                # Yield black frame as placeholder
-                yield np.zeros((h, w, 3), dtype=np.uint8)
+            if not ret:
+                break
+            if idx in target_indices:
+                yield img if img is not None else np.zeros((h, w, 3), dtype=np.uint8)
+            idx += 1
 
     _pipe_frames_to_ffmpeg(frames(), output_path, fps, w, h)
     cap.release()
@@ -358,21 +386,23 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
     out_dir = os.path.join(dst_dir, mode)
     os.makedirs(out_dir, exist_ok=True)
 
-    # Load/save completed tracking
+    # Load/save completed and failed tracking
     completed_path = os.path.join(dst_dir, f"completed_{mode}.json")
+    failed_path = os.path.join(dst_dir, f"failed_{mode}.json")
     completed = load_completed(completed_path)
+    failed_set = load_completed(failed_path)
 
     video_ids = sorted(video_dict.keys())
     total = len(video_ids)
     converted = 0
-    failed = []
 
     for seq_idx, video_id in enumerate(video_ids):
         if max_samples > 0 and converted >= max_samples:
             break
 
-        if video_id in completed:
-            converted += 1
+        if video_id in completed or video_id in failed_set:
+            if video_id in completed:
+                converted += 1
             continue
 
         anno_dir = os.path.join(anno_base, video_id)
@@ -388,7 +418,8 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
             print(f"  Downloaded.", flush=True)
         except Exception as e:
             print(f"  FAILED download: {e}")
-            failed.append(video_id)
+            failed_set.add(video_id)
+            save_completed(failed_path, failed_set)
             continue
 
         # Build egodex data
@@ -445,9 +476,9 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
         save_completed(completed_path, completed)
         converted += 1
 
-    print(f"\nDone. Converted {converted} videos, {len(failed)} failed.")
-    if failed:
-        print(f"Failed: {failed}")
+    print(f"\nDone. Converted {converted} videos, {len(failed_set)} failed.")
+    if failed_set:
+        print(f"Failed: {sorted(failed_set)}")
 
 
 def main():

@@ -51,23 +51,6 @@ def planarity_error(points: np.ndarray, normalize: bool = False) -> float:
         return err / length
     return err
 
-# def bending_purity_error(points: np.ndarray) -> float:
-def planarity_error(points: np.ndarray, normalize: bool = False) -> float:
-    # 1. 중심화 및 SVD
-    centered = points - points.mean(axis=0, keepdims=True)
-    _, s, _ = np.linalg.svd(centered)
-    
-    # s[0]: 길이, s[1]: 굽힘(Bending), s[2]: 비틀림(Torsion)
-    sigma_1, sigma_2, sigma_3 = s[0], s[1], s[2]
-    
-    # 만약 손가락이 거의 일직선이라 s[1]이 너무 작으면 판별 불가
-    if sigma_2 < 1e-8:
-        return 0.0 
-    
-    # 굽힘 방향(s1) 대비 비틀림 방향(s2)의 비율
-    # 이 값이 작을수록 "한 축으로만 예쁘게 휘었다"는 뜻
-    return sigma_3 / sigma_2
-
 def finger_length(points):
     """Sum of bone segment lengths."""
     return sum(np.linalg.norm(points[i + 1] - points[i]) for i in range(len(points) - 1))
@@ -78,11 +61,14 @@ def extract_positions(transforms):
     return transforms[:, :3, 3]
 
 
-def eval_sequence(hdf5_path, normalize=False):
+def eval_sequence(hdf5_path, normalize=False, hop=1):
     """Evaluate planarity for one HDF5 file.
 
+    Args:
+        hop: Evaluate every N-th frame (1=all frames, 10=every 10th).
+
     Returns:
-        dict {side_finger: (N,) array of errors} for fingers with confidence > 0
+        dict {side_finger: (M,) array of errors} for fingers with confidence > 0
     """
     results = {}
 
@@ -106,10 +92,7 @@ def eval_sequence(hdf5_path, normalize=False):
                         continue
 
                 # Load positions: (N, 3) for each of 4 joints
-                positions = [extract_positions(tf_group[name][:]) for name in joint_names]
-
-                # for idx in range(len(positions)):
-                #     positions[idx] = positions[idx][1:-1]
+                positions = [extract_positions(tf_group[name][::hop]) for name in joint_names]
 
                 N = positions[0].shape[0]
 
@@ -128,7 +111,7 @@ def eval_sequence(hdf5_path, normalize=False):
     return results
 
 
-def eval_dataset(src_dir, normalize=False, max_samples=0):
+def eval_dataset(src_dir, normalize=False, max_samples=0, hop=1):
     """Evaluate planarity across all sequences in a converted dataset."""
     seq_dirs = sorted([
         d for d in os.listdir(src_dir)
@@ -138,16 +121,16 @@ def eval_dataset(src_dir, normalize=False, max_samples=0):
     all_errors = {}  # finger -> list of arrays
     n_seqs = 0
 
-    for seq_name in seq_dirs:
-        if max_samples > 0 and n_seqs >= max_samples:
-            break
+    if max_samples > 0:
+        seq_dirs = seq_dirs[:max_samples]
 
+    for seq_name in tqdm(seq_dirs, desc="Evaluating"):
         hdf5_files = sorted(glob.glob(os.path.join(src_dir, seq_name, "*_00.hdf5"))) # global keypoints are same anywhere.
         if not hdf5_files:
             continue
 
-        for hdf5_path in hdf5_files:
-            results = eval_sequence(hdf5_path, normalize=normalize)
+        for hdf5_path in tqdm(hdf5_files, desc=f"  {seq_name}", leave=False):
+            results = eval_sequence(hdf5_path, normalize=normalize, hop=hop)
             for key, errors in results.items():
                 all_errors.setdefault(key, []).append(errors)
 
@@ -201,9 +184,12 @@ def main():
                         help="Report error as %% of finger length")
     parser.add_argument("--max-samples", type=int, default=0,
                         help="Max sequences to evaluate (0=all)")
+    parser.add_argument("--hop", type=int, default=1,
+                        help="Evaluate every N-th frame (default: 1=all)")
     args = parser.parse_args()
 
-    eval_dataset(args.src, normalize=args.normalize, max_samples=args.max_samples)
+    eval_dataset(args.src, normalize=args.normalize, max_samples=args.max_samples,
+                 hop=args.hop)
 
 
 if __name__ == "__main__":
