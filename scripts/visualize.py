@@ -13,6 +13,8 @@ Usage:
     python scripts/visualize.py --src CONVERTED/ho_cap --n 10 --out outputs --seed 0
     python scripts/visualize.py --src CONVERTED/freihand_train --n 100 --out outputs --seed 0
     python scripts/visualize.py --src CONVERTED/rhd --n 20 --out outputs --seed 0
+
+    python scripts/visualize.py --src CONVERTED/interhand26m --n 20 --out outputs --seed 0
 """
 
 import argparse

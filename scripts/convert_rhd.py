@@ -127,15 +127,16 @@ def build_cam_extrinsic(cam_param):
     aux_mx[2, 2] = -1.0
     rot_mx = rot_mx.dot(aux_mx)
 
-    # World-to-camera: first translate, then rotate
-    # cam_point = rot_mx @ (world_point - translation)
+    # RHD row-vector convention: cam_point = (world_point - translation) @ rot_mx
+    # In column convention: cam_point = rot_mx^T @ (world_point - translation)
+    # So world-to-camera: R_w2c = rot_mx^T, t_w2c = -rot_mx^T @ translation
     extrinsic = np.eye(4, dtype=np.float32)
-    extrinsic[:3, :3] = rot_mx.astype(np.float32)
-    extrinsic[:3, 3] = (-rot_mx @ translation).astype(np.float32)
+    extrinsic[:3, :3] = rot_mx.T.astype(np.float32)
+    extrinsic[:3, 3] = (-rot_mx.T @ translation).astype(np.float32)
 
-    # Camera pose (camera-to-world): inverse of extrinsic
+    # Camera pose (camera-to-world): R_c2w = rot_mx, t_c2w = translation
     cam_pose = np.eye(4, dtype=np.float32)
-    cam_pose[:3, :3] = rot_mx.T.astype(np.float32)
+    cam_pose[:3, :3] = rot_mx.astype(np.float32)
     cam_pose[:3, 3] = translation.astype(np.float32)
 
     return extrinsic, cam_pose

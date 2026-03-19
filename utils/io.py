@@ -1,5 +1,6 @@
 """I/O utilities for loading DexYCB data and writing egodex format."""
 
+import json
 import os
 import glob
 import subprocess
@@ -146,6 +147,100 @@ def depth_images_to_mp4(image_paths: list, output_path: str, fps: float = 30.0):
         raise RuntimeError(f"ffmpeg failed for {output_path}: {err}")
 
 
+def _compute_valid_ranges(valid_mask: np.ndarray) -> list:
+    """Compute contiguous [start, end) ranges where all values are True.
+
+    Args:
+        valid_mask: (N,) boolean array.
+
+    Returns:
+        List of [start, end) pairs (integers).
+    """
+    if len(valid_mask) == 0:
+        return []
+    # Pad with False at boundaries to detect edges
+    padded = np.concatenate([[False], valid_mask, [False]])
+    diff = np.diff(padded.astype(np.int8))
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]
+    return [[int(s), int(e)] for s, e in zip(starts, ends)]
+
+
+# 21 joint names per side, matching MANO order (same as in HDF5Dataset).
+_SIDE_JOINT_NAMES = {
+    'right': [
+        'rightHand',
+        'rightThumbKnuckle', 'rightThumbIntermediateBase', 'rightThumbIntermediateTip', 'rightThumbTip',
+        'rightIndexFingerKnuckle', 'rightIndexFingerIntermediateBase', 'rightIndexFingerIntermediateTip', 'rightIndexFingerTip',
+        'rightMiddleFingerKnuckle', 'rightMiddleFingerIntermediateBase', 'rightMiddleFingerIntermediateTip', 'rightMiddleFingerTip',
+        'rightRingFingerKnuckle', 'rightRingFingerIntermediateBase', 'rightRingFingerIntermediateTip', 'rightRingFingerTip',
+        'rightLittleFingerKnuckle', 'rightLittleFingerIntermediateBase', 'rightLittleFingerIntermediateTip', 'rightLittleFingerTip',
+    ],
+    'left': [
+        'leftHand',
+        'leftThumbKnuckle', 'leftThumbIntermediateBase', 'leftThumbIntermediateTip', 'leftThumbTip',
+        'leftIndexFingerKnuckle', 'leftIndexFingerIntermediateBase', 'leftIndexFingerIntermediateTip', 'leftIndexFingerTip',
+        'leftMiddleFingerKnuckle', 'leftMiddleFingerIntermediateBase', 'leftMiddleFingerIntermediateTip', 'leftMiddleFingerTip',
+        'leftRingFingerKnuckle', 'leftRingFingerIntermediateBase', 'leftRingFingerIntermediateTip', 'leftRingFingerTip',
+        'leftLittleFingerKnuckle', 'leftLittleFingerIntermediateBase', 'leftLittleFingerIntermediateTip', 'leftLittleFingerTip',
+    ],
+}
+
+
+def update_sequence_meta(hdf5_path: str):
+    """Compute metadata for an HDF5 label file and update _meta.json in its directory.
+
+    Detects sides from transforms/ keys (not mano_ groups), so it works
+    correctly even before extra mano groups are added (e.g. ho_cap multi-hand).
+
+    The _meta.json maps each HDF5 filename to:
+        {"sides": {"right": {"n_frames": int, "valid_ranges": [[start, end), ...]}, ...}}
+    """
+    hdf5_dir = os.path.dirname(hdf5_path)
+    hdf5_name = os.path.basename(hdf5_path)
+    meta_path = os.path.join(hdf5_dir, "_meta.json")
+
+    # Load existing meta or start fresh
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = json.load(f)
+    else:
+        meta = {}
+
+    entry = {"sides": {}}
+
+    with h5py.File(hdf5_path, "r") as f:
+        tf_keys = set(f["transforms"].keys()) if "transforms" in f else set()
+        has_conf = "confidences" in f
+
+        for side, joint_names in _SIDE_JOINT_NAMES.items():
+            first_joint = joint_names[0]
+            if first_joint not in tf_keys:
+                continue
+
+            n_frames = f[f"transforms/{first_joint}"].shape[0]
+
+            if has_conf:
+                conf = np.stack(
+                    [f[f"confidences/{j}"][:] for j in joint_names if j in f["confidences"]],
+                    axis=1,
+                )  # (n_frames, n_joints)
+                valid = np.all(conf > 0, axis=1)
+            else:
+                valid = np.ones(n_frames, dtype=bool)
+
+            entry["sides"][side] = {
+                "n_frames": int(n_frames),
+                "valid_ranges": _compute_valid_ranges(valid),
+            }
+
+    if entry["sides"]:
+        meta[hdf5_name] = entry
+
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, separators=(",", ":"))
+
+
 def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
                       transforms_dict: dict, confidences_dict: dict,
                       mano_dict: dict = None):
@@ -196,3 +291,6 @@ def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
                                data=mano_dict["transl_worldspace"].astype(np.float32))
             grp.create_dataset("kpt3d",
                                data=mano_dict["kpt3d"].astype(np.float32))
+
+    # Auto-generate _meta.json entry for this HDF5 file
+    update_sequence_meta(output_path)
