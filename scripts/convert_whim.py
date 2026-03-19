@@ -22,7 +22,7 @@ Multi-hand policy:
     When multiple same-side hands exist, keep the largest bbox.
 
 Output structure:
-    CONVERTED/whim/
+    CONVERTED/whim_train/
         {mode}/
             {seq_idx:06d}_label_00.hdf5
             {seq_idx:06d}_video_00.mp4
@@ -30,8 +30,8 @@ Output structure:
         completed_train.json / completed_test.json
 
 Usage:
-    python scripts/convert_whim.py --src ../WiLoR --dst CONVERTED/whim --mode train
-    python scripts/convert_whim.py --mode test --max-samples 5
+    python scripts/convert_whim.py --src ../WiLoR --dst CONVERTED/whim_train --mode train
+    python scripts/convert_whim.py --src ../WiLoR --dst CONVERTED/whim_test --mode test
 """
 
 import argparse
@@ -75,9 +75,18 @@ def save_completed(path: str, completed: set):
 
 
 def download_video(video_id: str, video_info: dict, output_dir: str,
-                    timeout: int = 60) -> str:
-    """Download a YouTube video with timeout. Returns path to downloaded file."""
+                    timeout: int = 300) -> str:
+    """Download a YouTube video with timeout. Returns path to downloaded file.
+
+    Raises RuntimeError with message starting with:
+        "UNAVAILABLE:" — video is permanently gone, should not retry
+        "TIMEOUT:" — download too slow, may succeed on retry
+        "BOT:" — rate-limited by YouTube, retry later
+        Other — transient errors, retry possible
+    """
     import multiprocessing
+    import multiprocessing.queues
+    from queue import Empty
 
     out_path = os.path.join(output_dir, f"{video_id}.mp4")
     if os.path.exists(out_path):
@@ -85,43 +94,62 @@ def download_video(video_id: str, video_info: dict, output_dir: str,
 
     os.makedirs(output_dir, exist_ok=True)
 
-    def _download(video_id, video_info, output_dir, out_path):
-        from pytubefix import YouTube
-        res = video_info["res"][0]
-        yt = YouTube(f"https://youtu.be/{video_id}")
-        stream = yt.streams.filter(
-            only_video=True, file_extension="mp4",
-            video_codec="avc1", res=f"{res}p",
-        ).first()
-        if stream is None:
-            stream = yt.streams.filter(
-                only_video=True, file_extension="mp4", video_codec="avc1",
-            ).order_by("resolution").desc().first()
-        if stream is None:
+    def _resolve_and_download(video_id, video_info, output_dir, result_q):
+        """Resolve stream and download in a subprocess (handles hangs)."""
+        try:
+            from pytubefix import YouTube
+            res = video_info["res"][0]
+            yt = YouTube(f"https://youtu.be/{video_id}")
             stream = yt.streams.filter(
                 only_video=True, file_extension="mp4",
-            ).order_by("resolution").desc().first()
-        if stream is None:
-            raise RuntimeError(f"No suitable stream found for {video_id}")
-        stream.download(output_path=output_dir, filename=f"{video_id}.mp4")
+                video_codec="avc1", res=f"{res}p",
+            ).first()
+            if stream is None:
+                stream = yt.streams.filter(
+                    only_video=True, file_extension="mp4", video_codec="avc1",
+                ).order_by("resolution").desc().first()
+            if stream is None:
+                stream = yt.streams.filter(
+                    only_video=True, file_extension="mp4",
+                ).order_by("resolution").desc().first()
+            if stream is None:
+                result_q.put(("UNAVAILABLE", f"no suitable stream for {video_id}"))
+                return
+            stream.download(output_path=output_dir, filename=f"{video_id}.mp4")
+            result_q.put(("OK", ""))
+        except Exception as e:
+            msg = str(e)
+            if "unavailable" in msg.lower() or "not available" in msg.lower():
+                result_q.put(("UNAVAILABLE", msg))
+            elif "bot" in msg.lower():
+                result_q.put(("BOT", msg))
+            else:
+                result_q.put(("ERROR", msg))
 
+    result_q = multiprocessing.Queue()
     proc = multiprocessing.Process(
-        target=_download, args=(video_id, video_info, output_dir, out_path))
+        target=_resolve_and_download,
+        args=(video_id, video_info, output_dir, result_q))
     proc.start()
     proc.join(timeout=timeout)
 
     if proc.is_alive():
         proc.kill()
         proc.join()
-        # Clean up partial download
         if os.path.exists(out_path):
             os.remove(out_path)
-        raise RuntimeError(f"Download timed out after {timeout}s")
+        raise RuntimeError(f"TIMEOUT: exceeded {timeout}s")
 
-    if proc.exitcode != 0:
+    # Get result from subprocess
+    try:
+        status, msg = result_q.get_nowait()
+    except Empty:
+        status, msg = "ERROR", f"process exited with code {proc.exitcode}"
+
+    if status != "OK":
         if os.path.exists(out_path):
             os.remove(out_path)
-        raise RuntimeError(f"Download process failed (exit code {proc.exitcode})")
+        raise RuntimeError(f"{status}: {msg}")
 
     if not os.path.exists(out_path):
         raise RuntimeError(f"Download completed but file not found")
@@ -417,9 +445,13 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
             video_path = download_video(video_id, video_info, videos_dir)
             print(f"  Downloaded.", flush=True)
         except Exception as e:
-            print(f"  FAILED download: {e}")
-            failed_set.add(video_id)
-            save_completed(failed_path, failed_set)
+            msg = str(e)
+            print(f"  FAILED download: {msg}")
+            # Only permanently skip truly unavailable videos
+            if msg.startswith("UNAVAILABLE:"):
+                failed_set.add(video_id)
+                save_completed(failed_path, failed_set)
+            # BOT/TIMEOUT/other errors: don't save to failed, will retry next run
             continue
 
         # Build egodex data

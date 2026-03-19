@@ -153,7 +153,9 @@ def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
 
     Args:
         output_path: Path to write the HDF5 file.
-        intrinsic: (3, 3) camera intrinsic matrix.
+        intrinsic: (3, 3) or (N, 3, 3) camera intrinsic matrix(es).
+            If (N, 3, 3), stored as both camera/intrinsic (first frame)
+            and camera/intrinsics (all frames).
         transforms_dict: {joint_name: (N, 4, 4) array} world-space transforms.
         confidences_dict: {joint_name: (N,) array}
         mano_dict: Optional dict with MANO parameters.
@@ -164,7 +166,14 @@ def write_egodex_hdf5(output_path: str, intrinsic: np.ndarray,
     """
     with h5py.File(output_path, "w") as f:
         cam_grp = f.create_group("camera")
-        cam_grp.create_dataset("intrinsic", data=intrinsic)
+        intrinsic = np.asarray(intrinsic, dtype=np.float32)
+        if intrinsic.ndim == 3:
+            # Per-frame intrinsics: store (N, 3, 3) as "intrinsics"
+            # and first frame as "intrinsic" for backward compat
+            cam_grp.create_dataset("intrinsics", data=intrinsic)
+            cam_grp.create_dataset("intrinsic", data=intrinsic[0])
+        else:
+            cam_grp.create_dataset("intrinsic", data=intrinsic)
 
         tf_grp = f.create_group("transforms")
         conf_grp = f.create_group("confidences")
