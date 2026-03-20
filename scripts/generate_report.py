@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Generate dataset_report.md from _meta.json files in CONVERTED/.
 
+Fast: reads only _meta.json files and directory listings — no du, no glob.
+
 Usage:
     python scripts/generate_report.py [CONVERTED_ROOT]
 """
 import json
 import os
-import glob
-import subprocess
 import sys
 from datetime import date
 
@@ -15,12 +15,13 @@ from datetime import date
 CONVERTED = sys.argv[1] if len(sys.argv) > 1 else "CONVERTED"
 
 DATASETS_ORDER = [
-    "dex_ycb", "ho_cap", "egodex", "whim_train", "whim_test",
+    "dex_ycb", "ho_cap", "egodex", "arctic", "whim_train", "whim_test",
     "interhand26m", "freihand_train", "freihand_eval", "rhd", "hic",
 ]
 
 DISPLAY_NAMES = {
     "dex_ycb": "DexYCB", "ho_cap": "HO-Cap", "egodex": "EgoDex",
+    "arctic": "ARCTIC",
     "whim_train": "WHIM Train", "whim_test": "WHIM Test",
     "interhand26m": "InterHand2.6M",
     "freihand_train": "FreiHAND Train", "freihand_eval": "FreiHAND Eval",
@@ -31,6 +32,7 @@ SOURCES = {
     "dex_ycb": "[DexYCB](https://dex-ycb.github.io/) — tabletop grasping with YCB objects",
     "ho_cap": "[HO-Cap](https://irvlutd.github.io/HOCap/) — hand-object interaction",
     "egodex": "[EgoDex](https://github.com/facebookresearch/ego-dex) — egocentric hand tracking",
+    "arctic": "[ARCTIC](https://arctic.is.tue.mpg.de/) — articulated object manipulation with dexterous bimanual hands",
     "whim_train": "[WHIM/WiLoR](https://rolpotamern.github.io/WiLoR/) — in-the-wild YouTube hand data",
     "whim_test": "[WHIM/WiLoR](https://rolpotamern.github.io/WiLoR/) — in-the-wild YouTube hand data",
     "interhand26m": "[InterHand2.6M](https://mks0601.github.io/InterHand2.6M/) — multi-view interacting hands",
@@ -40,16 +42,20 @@ SOURCES = {
     "hic": "[HIC](https://files.is.tue.mpg.de/dtzionas/Hand-Object-Capture/) — hand-in-contact interaction",
 }
 
+# FreiHAND has no _meta.json; specify viewpoints for NPZ counting
+NPZ_VIEWPOINTS = {"freihand_train": 4, "freihand_eval": 1}
+
 
 def fmt(n):
     """Format integer with commas."""
     return f"{n:,}"
 
 
-def gather_hdf5_stats(dataset_dir):
-    """Gather statistics from _meta.json files for an HDF5 dataset."""
+def gather_meta_stats(dataset_dir):
+    """Gather statistics purely from _meta.json files (fast, no file scanning)."""
     st = {"clusters": 0, "files": 0, "left_only": 0, "right_only": 0,
-          "both": 0, "frame_counts": [], "unique_frames": 0, "vp_counts": []}
+          "both": 0, "frame_counts": [], "unique_frames": 0, "vp_counts": [],
+          "format": "HDF5"}
 
     clusters = sorted(d for d in os.listdir(dataset_dir)
                       if os.path.isdir(os.path.join(dataset_dir, d)))
@@ -62,7 +68,6 @@ def gather_hdf5_stats(dataset_dir):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        # Group files by sequence (part before _label_)
         seqs = {}
         for fname, entry in meta.items():
             st["files"] += 1
@@ -83,18 +88,20 @@ def gather_hdf5_stats(dataset_dir):
             seqs.setdefault(seq_id, []).append(nf)
 
         for seq_id, nfs in seqs.items():
-            st["unique_frames"] += nfs[0]  # one viewpoint's worth
+            st["unique_frames"] += nfs[0]
             st["vp_counts"].append(len(nfs))
 
     return st
 
 
 def gather_npz_stats(dataset_dir, viewpoints):
-    """Gather statistics for NPZ (FreiHAND) datasets."""
+    """Gather statistics for NPZ datasets by counting directory entries."""
     clusters = sorted(d for d in os.listdir(dataset_dir)
                       if os.path.isdir(os.path.join(dataset_dir, d)))
-    n_files = sum(len(glob.glob(os.path.join(dataset_dir, c, "*.npz")))
-                  for c in clusters)
+    n_files = sum(
+        sum(1 for f in os.listdir(os.path.join(dataset_dir, c)) if f.endswith(".npz"))
+        for c in clusters
+    )
     n_seqs = n_files // viewpoints
     return {
         "clusters": len(clusters),
@@ -102,13 +109,9 @@ def gather_npz_stats(dataset_dir, viewpoints):
         "left_only": 0, "right_only": n_files, "both": 0,
         "frame_counts": [1] * n_files,
         "unique_frames": n_seqs,
-        "vp_counts": [viewpoints] * n_seqs,  # one entry per sequence
+        "vp_counts": [viewpoints] * n_seqs,
+        "format": "NPZ",
     }
-
-
-def disk_size(path):
-    r = subprocess.run(["du", "-sh", path], capture_output=True, text=True)
-    return r.stdout.split()[0] if r.returncode == 0 else "?"
 
 
 # ---------------------------------------------------------------------------
@@ -119,14 +122,10 @@ for ds in DATASETS_ORDER:
     ds_dir = os.path.join(CONVERTED, ds)
     if not os.path.isdir(ds_dir):
         continue
-    if ds.startswith("freihand"):
-        vp = 4 if "train" in ds else 1
-        all_stats[ds] = gather_npz_stats(ds_dir, vp)
-        all_stats[ds]["format"] = "NPZ"
+    if ds in NPZ_VIEWPOINTS:
+        all_stats[ds] = gather_npz_stats(ds_dir, NPZ_VIEWPOINTS[ds])
     else:
-        all_stats[ds] = gather_hdf5_stats(ds_dir)
-        all_stats[ds]["format"] = "HDF5"
-    all_stats[ds]["disk"] = disk_size(ds_dir)
+        all_stats[ds] = gather_meta_stats(ds_dir)
 
 # ---------------------------------------------------------------------------
 # Build report
@@ -137,8 +136,8 @@ lines.append(f"\nGenerated: {date.today().isoformat()}")
 
 # --- Summary table ---
 lines.append("\n## Summary\n")
-lines.append("| Dataset | Format | Sequences | Viewpoints | Data Files | Unique Frames | Total Frames (all views) | Disk Size |")
-lines.append("|---------|--------|----------:|-----------:|-----------:|--------------:|-------------------------:|----------:|")
+lines.append("| Dataset | Format | Sequences | Viewpoints | Data Files | Unique Frames | Total Frames (all views) |")
+lines.append("|---------|--------|----------:|-----------:|-----------:|--------------:|-------------------------:|")
 
 totals = {"files": 0, "unique": 0, "total": 0}
 for ds in DATASETS_ORDER:
@@ -151,7 +150,7 @@ for ds in DATASETS_ORDER:
     vc = st["vp_counts"]
     vp_min, vp_max = (min(vc), max(vc)) if vc else (1, 1)
     vp_str = str(vp_min) if vp_min == vp_max else f"{vp_min}–{vp_max}"
-    n_seqs = len(vc)  # number of sequences
+    n_seqs = len(vc)
 
     suffix = r"\*" if ds == "whim_train" else ""
     name = DISPLAY_NAMES[ds]
@@ -159,7 +158,7 @@ for ds in DATASETS_ORDER:
     lines.append(
         f"| {name:14s} | {st['format']:6s} | {fmt(n_seqs)+suffix:>9s} | "
         f"{vp_str:>10s} | {fmt(st['files'])+suffix:>10s} | "
-        f"{fmt(uf)+suffix:>13s} | {fmt(total_frames)+suffix:>24s} | {st['disk']:>9s} |"
+        f"{fmt(uf)+suffix:>13s} | {fmt(total_frames)+suffix:>24s} |"
     )
     totals["files"] += st["files"]
     totals["unique"] += uf
@@ -167,7 +166,7 @@ for ds in DATASETS_ORDER:
 
 lines.append(
     f"| **Total** | | | — | **{fmt(totals['files'])}** | "
-    f"**{fmt(totals['unique'])}** | **{fmt(totals['total'])}** | |"
+    f"**{fmt(totals['unique'])}** | **{fmt(totals['total'])}** |"
 )
 lines.append(r"""
 \* WHIM Train: 176/1,431 videos completed, 1,255 failed (YouTube unavailable).""")

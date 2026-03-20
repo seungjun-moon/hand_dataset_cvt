@@ -1,22 +1,23 @@
 # Converted Dataset Report
 
-Generated: 2026-03-19
+Generated: 2026-03-20
 
 ## Summary
 
-| Dataset | Format | Sequences | Viewpoints | Data Files | Unique Frames | Total Frames (all views) | Disk Size |
-|---------|--------|----------:|-----------:|-----------:|--------------:|-------------------------:|----------:|
-| DexYCB         | HDF5   |     1,000 |          8 |      8,000 |        63,548 |                  508,384 |       52G |
-| HO-Cap         | HDF5   |        64 |          8 |        512 |        72,575 |                  583,183 |      6.0G |
-| EgoDex         | HDF5   |     3,769 |          1 |      3,769 |     1,469,838 |                1,469,838 |       34G |
-| WHIM Train     | HDF5   |     176\* |          1 |      176\* |     329,403\* |                329,403\* |      7.3G |
-| WHIM Test      | HDF5   |        26 |          1 |         26 |        34,869 |                   34,869 |      944M |
-| InterHand2.6M  | HDF5   |     4,909 |          1 |      4,909 |       820,210 |                  820,210 |       15G |
-| FreiHAND Train | NPZ    |    32,560 |          4 |    130,240 |        32,560 |                  130,240 |      3.5G |
-| FreiHAND Eval  | NPZ    |     3,960 |          1 |      3,960 |         3,960 |                    3,960 |      105M |
-| RHD            | HDF5   |        29 |         25 |        725 |        14,500 |                  362,500 |      3.5G |
-| HIC            | HDF5   |        18 |          1 |         18 |           732 |                      732 |       16M |
-| **Total** | | | — | **152,335** | **2,842,195** | **4,243,319** | |
+| Dataset | Format | Sequences | Viewpoints | Data Files | Unique Frames | Total Frames (all views) |
+|---------|--------|----------:|-----------:|-----------:|--------------:|-------------------------:|
+| DexYCB         | HDF5   |     1,000 |          8 |      8,000 |        63,548 |                  508,384 |
+| HO-Cap         | HDF5   |        64 |          8 |        512 |        72,575 |                  583,183 |
+| EgoDex         | HDF5   |     3,769 |          1 |      3,769 |     1,469,838 |                1,469,838 |
+| ARCTIC         | HDF5   |         1 |          9 |          9 |           732 |                    6,588 |
+| WHIM Train     | HDF5   |     212\* |          1 |      212\* |     367,469\* |                367,469\* |
+| WHIM Test      | HDF5   |        26 |          1 |         26 |        34,869 |                   34,869 |
+| InterHand2.6M  | HDF5   |     4,909 |          1 |      4,909 |       820,210 |                  820,210 |
+| FreiHAND Train | NPZ    |    32,560 |          4 |    130,240 |        32,560 |                  130,240 |
+| FreiHAND Eval  | NPZ    |     3,960 |          1 |      3,960 |         3,960 |                    3,960 |
+| RHD            | HDF5   |        29 |         25 |        725 |        14,500 |                  362,500 |
+| HIC            | HDF5   |        18 |          1 |         18 |           732 |                      732 |
+| **Total** | | | — | **152,380** | **2,880,993** | **4,287,973** |
 
 \* WHIM Train: 176/1,431 videos completed, 1,255 failed (YouTube unavailable).
 
@@ -27,7 +28,8 @@ Generated: 2026-03-19
 | DexYCB         |     3,992 |      4,008 |          0 |       8,000 |
 | HO-Cap         |        64 |        280 |        168 |         512 |
 | EgoDex         |         1 |         75 |      3,693 |       3,769 |
-| WHIM Train     |         0 |          0 |        176 |         176 |
+| ARCTIC         |         0 |          0 |          9 |           9 |
+| WHIM Train     |         0 |          0 |        212 |         212 |
 | WHIM Test      |         0 |          0 |         26 |          26 |
 | InterHand2.6M  |       143 |      1,154 |      3,612 |       4,909 |
 | FreiHAND Train |         0 |    130,240 |          0 |     130,240 |
@@ -42,7 +44,8 @@ Generated: 2026-03-19
 | DexYCB         |  25 |   63 |    76 |        63,548 |      508,384 |
 | HO-Cap         | 446 | 1,139 | 2,457 |        72,575 |      583,183 |
 | EgoDex         |  15 |  389 | 4,784 |     1,469,838 |    1,469,838 |
-| WHIM Train     |  16 | 1,871 | 13,330 |       329,403 |      329,403 |
+| ARCTIC         | 732 |  732 |   732 |           732 |        6,588 |
+| WHIM Train     |  16 | 1,733 | 13,330 |       367,469 |      367,469 |
 | WHIM Test      |  41 | 1,341 | 2,482 |        34,869 |       34,869 |
 | InterHand2.6M  |   5 |  167 |   590 |       820,210 |      820,210 |
 | FreiHAND Train |   1 |    1 |     1 |        32,560 |      130,240 |
@@ -85,6 +88,17 @@ Generated: 2026-03-19
 | Frames/file | 15–4,784 (mean: 389) |
 | MANO | 100% |
 
+### ARCTIC
+
+| Property | Value |
+|----------|-------|
+| Source | [ARCTIC](https://arctic.is.tue.mpg.de/) — articulated object manipulation with dexterous bimanual hands |
+| Clusters | 1 |
+| Viewpoints | 9 |
+| Hand sides | left: 0 / right: 0 / both: 9 |
+| Frames/file | 732 (constant) |
+| MANO | 100% |
+
 ### WHIM Train
 
 | Property | Value |
@@ -92,8 +106,8 @@ Generated: 2026-03-19
 | Source | [WHIM/WiLoR](https://rolpotamern.github.io/WiLoR/) — in-the-wild YouTube hand data |
 | Clusters | 1 |
 | Viewpoints | 1 |
-| Hand sides | left: 0 / right: 0 / both: 176 |
-| Frames/file | 16–13,330 (mean: 1,871) |
+| Hand sides | left: 0 / right: 0 / both: 212 |
+| Frames/file | 16–13,330 (mean: 1,733) |
 | MANO | 100% |
 
 ### WHIM Test
