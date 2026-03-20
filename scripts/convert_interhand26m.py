@@ -253,6 +253,9 @@ def build_egodex_data_for_camera(
     left_joints_world = np.zeros((M, 21, 3), dtype=np.float32)
     right_valid = np.zeros(M, dtype=np.float32)
     left_valid = np.zeros(M, dtype=np.float32)
+    # Per-joint validity: (M, 21) per side, in MANO ordering
+    right_joint_valid = np.zeros((M, 21), dtype=np.float32)
+    left_joint_valid = np.zeros((M, 21), dtype=np.float32)
 
     # MANO params per side
     right_poses = np.zeros((M, 48), dtype=np.float64)
@@ -264,22 +267,27 @@ def build_egodex_data_for_camera(
 
     for i, (frame_idx_str, seq_name) in enumerate(frame_list):
         frame_joints = joints[capture_id][frame_idx_str]
-        world_coord = np.array(frame_joints['world_coord'], dtype=np.float32)  # (42, 3)
-        joint_valid = np.array(frame_joints['joint_valid'], dtype=np.float32)   # (42,)
+        world_coord = np.array(frame_joints['world_coord'], dtype=np.float32).reshape(42, 3)
+        joint_valid = np.array(frame_joints['joint_valid'], dtype=np.float32).flatten()
 
         # Right hand (IH26M indices 0-20)
         right_world_ih = world_coord[:21]   # (21, 3) in IH26M order
         right_jv = joint_valid[:21]
-        if right_jv[IH26M_WRIST_RIGHT] > 0 and np.sum(right_jv) > 0:
+        if np.any(right_jv > 0):
             right_joints_world[i] = reorder_ih26m_to_mano(right_world_ih)
             right_valid[i] = 1.0
+            # Reorder per-joint validity to MANO ordering
+            for ih_idx, mano_idx in enumerate(IH26M_TO_MANO):
+                right_joint_valid[i, mano_idx] = right_jv[ih_idx]
 
         # Left hand (IH26M indices 21-41)
         left_world_ih = world_coord[21:]    # (21, 3) in IH26M order
         left_jv = joint_valid[21:]
-        if left_jv[IH26M_WRIST_LEFT - 21] > 0 and np.sum(left_jv) > 0:
+        if np.any(left_jv > 0):
             left_joints_world[i] = reorder_ih26m_to_mano(left_world_ih)
             left_valid[i] = 1.0
+            for ih_idx, mano_idx in enumerate(IH26M_TO_MANO):
+                left_joint_valid[i, mano_idx] = left_jv[ih_idx]
 
         # MANO params
         try:
@@ -298,6 +306,39 @@ def build_egodex_data_for_camera(
             left_trans[i] = np.array(mano_frame['left']['trans'], dtype=np.float64)
             if left_betas is None:
                 left_betas = np.array(mano_frame['left']['shape'], dtype=np.float32)
+
+    # Interpolate single-frame joint gaps; mask entire hand for 2+ consecutive gaps
+    for joints_world, jv, hand_valid in [
+        (right_joints_world, right_joint_valid, right_valid),
+        (left_joints_world, left_joint_valid, left_valid),
+    ]:
+        for j in range(21):
+            col = jv[:, j]  # (M,) validity for this joint
+            i = 0
+            while i < M:
+                if col[i] > 0:
+                    i += 1
+                    continue
+                # Find the run of invalid frames for this joint
+                run_start = i
+                while i < M and col[i] == 0:
+                    i += 1
+                run_end = i  # exclusive
+                run_len = run_end - run_start
+
+                if run_len == 1 and run_start > 0 and run_end < M \
+                        and col[run_start - 1] > 0 and col[run_end] > 0 \
+                        and hand_valid[run_start] > 0:
+                    # Single-frame gap with valid neighbors: interpolate
+                    joints_world[run_start, j] = 0.5 * (
+                        joints_world[run_start - 1, j] +
+                        joints_world[run_end, j]
+                    )
+                    jv[run_start, j] = 1.0
+                else:
+                    # 2+ consecutive gap: mask out the entire hand for these frames
+                    for k in range(run_start, run_end):
+                        hand_valid[k] = 0.0
 
     # Build transforms for each hand
     has_right = np.any(right_valid > 0)

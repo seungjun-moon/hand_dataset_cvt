@@ -9,12 +9,17 @@ Automatically detects the dataset format:
   - NPZ:  *.npz + *.jpg (image-wise, e.g. FreiHAND)
 
 Usage:
-    python scripts/visualize.py --src CONVERTED/dex_ycb --n 100 --out outputs
+    python scripts/visualize.py --src CONVERTED/freihand_train --n 30 --out outputs
     python scripts/visualize.py --src CONVERTED/ho_cap --n 10 --out outputs --seed 0
     python scripts/visualize.py --src CONVERTED/freihand_train --n 100 --out outputs --seed 0
     python scripts/visualize.py --src CONVERTED/rhd --n 20 --out outputs --seed 0
 
-    python scripts/visualize.py --src CONVERTED/interhand26m --n 20 --out outputs --seed 0
+    python scripts/visualize.py --src CONVERTED/h2o3d --n 20 --out outputs --seed 0
+    python scripts/visualize.py --src CONVERTED/interhand26m_train --n 20 --out outputs --seed 0
+    python scripts/visualize.py --src CONVERTED/interhand26m_val --n 20 --out outputs --seed 0
+    python scripts/visualize.py --src CONVERTED/interhand26m_test --n 20 --out outputs --seed 0
+
+    python scripts/visualize.py --src CONVERTED/mtc_train --n 20 --out outputs --seed 0
 """
 
 import argparse

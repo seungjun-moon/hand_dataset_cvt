@@ -16,16 +16,19 @@ CONVERTED = sys.argv[1] if len(sys.argv) > 1 else "CONVERTED"
 
 DATASETS_ORDER = [
     "dex_ycb", "ho_cap", "egodex", "arctic", "whim_train", "whim_test",
-    "interhand26m", "freihand_train", "freihand_eval", "rhd", "hic",
+    "interhand26m_train", "interhand26m_test", "freihand_train", "freihand_eval",
+    "rhd", "hic", "h2o3d", "mtc_train", "reinterhand",
 ]
 
 DISPLAY_NAMES = {
     "dex_ycb": "DexYCB", "ho_cap": "HO-Cap", "egodex": "EgoDex",
     "arctic": "ARCTIC",
     "whim_train": "WHIM Train", "whim_test": "WHIM Test",
-    "interhand26m": "InterHand2.6M",
+    "interhand26m_train": "InterHand2.6M Train", "interhand26m_test": "InterHand2.6M Test",
     "freihand_train": "FreiHAND Train", "freihand_eval": "FreiHAND Eval",
     "rhd": "RHD", "hic": "HIC",
+    "h2o3d": "H2O-3D", "mtc_train": "MTC Train", "mtc_eval": "MTC Eval",
+    "reinterhand": "ReInterHand",
 }
 
 SOURCES = {
@@ -35,11 +38,16 @@ SOURCES = {
     "arctic": "[ARCTIC](https://arctic.is.tue.mpg.de/) — articulated object manipulation with dexterous bimanual hands",
     "whim_train": "[WHIM/WiLoR](https://rolpotamern.github.io/WiLoR/) — in-the-wild YouTube hand data",
     "whim_test": "[WHIM/WiLoR](https://rolpotamern.github.io/WiLoR/) — in-the-wild YouTube hand data",
-    "interhand26m": "[InterHand2.6M](https://mks0601.github.io/InterHand2.6M/) — multi-view interacting hands",
+    "interhand26m_train": "[InterHand2.6M](https://mks0601.github.io/InterHand2.6M/) — multi-view interacting hands (train split)",
+    "interhand26m_test": "[InterHand2.6M](https://mks0601.github.io/InterHand2.6M/) — multi-view interacting hands (test split)",
     "freihand_train": "[FreiHAND](https://lmb.informatik.uni-freiburg.de/projects/freihand/) — real hand images with MANO annotations",
     "freihand_eval": "[FreiHAND](https://lmb.informatik.uni-freiburg.de/projects/freihand/) — real hand images with MANO annotations",
     "rhd": "[RHD](https://lmb.informatik.uni-freiburg.de/resources/datasets/RenderedHandposeDataset.en.html) — rendered synthetic hand poses",
     "hic": "[HIC](https://files.is.tue.mpg.de/dtzionas/Hand-Object-Capture/) — hand-in-contact interaction",
+    "h2o3d": "[H2O-3D](https://www.taeinkwon.com/projects/h2o) — egocentric hand-object interaction with 3D annotations",
+    "mtc_train": "[MTC](http://domedb.perception.cs.cmu.edu/handdb.html) — Panoptic Studio multi-view hand capture (train)",
+    "mtc_eval": "[MTC](http://domedb.perception.cs.cmu.edu/handdb.html) — Panoptic Studio multi-view hand capture (eval)",
+    "reinterhand": "[ReInterHand](https://mks0601.github.io/ReInterHand/) — re-annotated interacting hands with MANO fits",
 }
 
 # FreiHAND has no _meta.json; specify viewpoints for NPZ counting
@@ -169,7 +177,7 @@ lines.append(
     f"**{fmt(totals['unique'])}** | **{fmt(totals['total'])}** |"
 )
 lines.append(r"""
-\* WHIM Train: 176/1,431 videos completed, 1,255 failed (YouTube unavailable).""")
+\* WHIM Train: 215/245 videos completed, 30 failed (YouTube unavailable).""")
 
 # --- Hand Side Distribution ---
 lines.append("\n## Hand Side Distribution\n")

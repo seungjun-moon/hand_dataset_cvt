@@ -9,12 +9,14 @@
 #SBATCH --output=logs/convert_interhand26m_%j.out
 #SBATCH --error=logs/convert_interhand26m_%j.err
 
+SPLIT=${1:-train}
+
 cd /rlwrld3/home/seungjun/hand_dataset_cvt
 
 mkdir -p logs
 
 python scripts/convert_interhand26m.py \
     --src ../InterWild/data/InterHand26M \
-    --dst CONVERTED/interhand26m \
-    --split train \
+    --dst "CONVERTED/interhand26m_${SPLIT}" \
+    --split "${SPLIT}" \
     --chunk-size 28
