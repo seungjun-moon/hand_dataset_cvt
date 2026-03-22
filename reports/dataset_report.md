@@ -1,6 +1,6 @@
 # Converted Dataset Report
 
-Generated: 2026-03-21
+Generated: 2026-03-22
 
 ## Summary
 
@@ -9,7 +9,7 @@ Generated: 2026-03-21
 | DexYCB         | HDF5   |     1,000 |          8 |      8,000 |        63,548 |                  508,384 |
 | HO-Cap         | HDF5   |        64 |          8 |        512 |        72,575 |                  583,183 |
 | EgoDex         | HDF5   |     3,769 |          1 |      3,769 |     1,469,838 |                1,469,838 |
-| ARCTIC         | HDF5   |        34 |          9 |        306 |        23,849 |                  214,641 |
+| ARCTIC         | HDF5   |       232 |        8–9 |      2,087 |       170,175 |                1,530,710 |
 | WHIM Train     | HDF5   |     216\* |          1 |      216\* |     378,096\* |                378,096\* |
 | WHIM Test      | HDF5   |        26 |          1 |         26 |        34,869 |                   34,869 |
 | InterHand2.6M Train | HDF5   |     7,767 |          1 |      7,767 |     1,343,641 |                1,343,641 |
@@ -21,7 +21,7 @@ Generated: 2026-03-21
 | H2O-3D         | HDF5   |        69 |          1 |         69 |        60,998 |                   60,998 |
 | MTC Train      | HDF5   |        29 |      29–31 |        874 |         9,804 |                  295,757 |
 | ReInterHand    | HDF5   |       200 |          1 |        200 |       375,123 |                  375,123 |
-| **Total** | | | — | **158,848** | **5,112,654** | **6,990,523** |
+| **Total** | | | — | **160,629** | **5,258,980** | **8,306,592** |
 
 \* WHIM Train: 215/245 videos completed, 30 failed (YouTube unavailable).
 
@@ -32,7 +32,7 @@ Generated: 2026-03-21
 | DexYCB         |     3,992 |      4,008 |          0 |       8,000 |
 | HO-Cap         |        64 |        280 |        168 |         512 |
 | EgoDex         |         1 |         75 |      3,693 |       3,769 |
-| ARCTIC         |         0 |          0 |        306 |         306 |
+| ARCTIC         |         0 |          0 |      2,087 |       2,087 |
 | WHIM Train     |         0 |          0 |        216 |         216 |
 | WHIM Test      |         0 |          0 |         26 |          26 |
 | InterHand2.6M Train |       143 |      1,888 |      5,736 |       7,767 |
@@ -52,7 +52,7 @@ Generated: 2026-03-21
 | DexYCB         |  25 |   63 |    76 |        63,548 |      508,384 |
 | HO-Cap         | 446 | 1,139 | 2,457 |        72,575 |      583,183 |
 | EgoDex         |  15 |  389 | 4,784 |     1,469,838 |    1,469,838 |
-| ARCTIC         | 559 |  701 | 1,012 |        23,849 |      214,641 |
+| ARCTIC         | 559 |  733 | 1,117 |       170,175 |    1,530,710 |
 | WHIM Train     |  16 | 1,750 | 13,330 |       378,096 |      378,096 |
 | WHIM Test      |  41 | 1,341 | 2,482 |        34,869 |       34,869 |
 | InterHand2.6M Train |   5 |  172 |   590 |     1,343,641 |    1,343,641 |
@@ -105,10 +105,10 @@ Generated: 2026-03-21
 | Property | Value |
 |----------|-------|
 | Source | [ARCTIC](https://arctic.is.tue.mpg.de/) — articulated object manipulation with dexterous bimanual hands |
-| Clusters | 11 |
-| Viewpoints | 9 |
-| Hand sides | left: 0 / right: 0 / both: 306 |
-| Frames/file | 559–1,012 (mean: 701) |
+| Clusters | 74 |
+| Viewpoints | 8–9 |
+| Hand sides | left: 0 / right: 0 / both: 2,087 |
+| Frames/file | 559–1,117 (mean: 733) |
 | MANO | 100% |
 
 ### WHIM Train
