@@ -118,7 +118,8 @@ def build_cam_extrinsic(cam_param):
         cam_extrinsic: (4, 4) world-to-camera transform
         cam_pose: (4, 4) camera-to-world transform (camera pose in world)
     """
-    translation = cam_param[1:4]
+    # RHD stores translation in cm; convert to meters.
+    translation = cam_param[1:4] / 100.0
     theta = cam_param[4:]
     rot_mx = euler_xyz_to_rot_mx(theta)
     # RHD applies a sign flip on Y and Z axes
@@ -222,7 +223,8 @@ def build_egodex_data_for_sequence(
     # Compute world-space transforms for all frames
     all_transforms_world = np.zeros((N, 21, 4, 4), dtype=np.float32)
     all_cam_poses = np.zeros((N, 4, 4), dtype=np.float32)
-    all_joint_3d_world = all_global_pose3d.astype(np.float32)  # (500, 21, 3) in cm
+    # RHD stores joint positions in cm; convert to meters.
+    all_joint_3d_world = all_global_pose3d.astype(np.float32) / 100.0  # (500, 21, 3) cm -> m
 
     for i in range(N):
         cam_param = all_camera_params[i, cam_idx]
@@ -230,9 +232,9 @@ def build_egodex_data_for_sequence(
         _, cam_pose = build_cam_extrinsic(cam_param)
         all_cam_poses[i] = cam_pose
 
-        # Compute transforms from joint positions in world space
-        joint_3d = all_global_pose3d[i]  # (21, 3)
-        transforms_local = joints_to_transforms(joint_3d.astype(np.float32))
+        # Compute transforms from joint positions in world space (already in meters)
+        joint_3d = all_joint_3d_world[i]  # (21, 3) in meters
+        transforms_local = joints_to_transforms(joint_3d)
         all_transforms_world[i] = transforms_local  # already in world space
 
     # Camera transform

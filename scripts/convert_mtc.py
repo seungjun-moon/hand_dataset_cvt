@@ -60,10 +60,13 @@ from utils.transforms import (
 
 
 def build_camera_pose(R, t):
-    """Build camera-to-world 4×4 from world-to-camera R, t."""
+    """Build camera-to-world 4×4 from world-to-camera R, t.
+
+    Panoptic Studio stores t in cm; convert to meters.
+    """
     T_w2c = np.eye(4, dtype=np.float32)
     T_w2c[:3, :3] = R.astype(np.float32)
-    T_w2c[:3, 3] = t.flatten().astype(np.float32)
+    T_w2c[:3, 3] = t.flatten().astype(np.float32) / 100.0
     return invert_rigid(T_w2c)
 
 
@@ -88,10 +91,6 @@ def build_egodex_data(clip_ann, cam_K, cam_pose, frame_indices):
     """
     M = len(frame_indices)
     identity = np.eye(4, dtype=np.float32)
-    # Inactive joints use a transform with position far off-screen
-    # so the visualizer's in_bounds check skips them.
-    inactive = np.eye(4, dtype=np.float32)
-    inactive[:3, 3] = 1e8
 
     transforms_dict = {}
     confidences_dict = {}
@@ -101,7 +100,7 @@ def build_egodex_data(clip_ann, cam_K, cam_pose, frame_indices):
 
     # Body joints (not available)
     for name in BODY_JOINTS:
-        transforms_dict[name] = np.tile(inactive, (M, 1, 1))
+        transforms_dict[name] = np.tile(identity, (M, 1, 1))
         confidences_dict[name] = np.zeros(M, dtype=np.float32)
 
     # Process each hand side
@@ -118,13 +117,14 @@ def build_egodex_data(clip_ann, cam_K, cam_pose, frame_indices):
             for out_idx, frame_idx in enumerate(frame_indices):
                 if frame_idx not in landmarks:
                     continue
-                lm_arr = np.array(landmarks[frame_idx], dtype=np.float32).reshape(21, 3)
+                # Panoptic Studio stores landmarks in cm; convert to meters.
+                lm_arr = np.array(landmarks[frame_idx], dtype=np.float32).reshape(21, 3) / 100.0
                 if np.linalg.norm(lm_arr) < 1e-6:
                     continue
                 joint_3d[out_idx] = lm_arr
                 conf[out_idx] = 1.0
 
-            all_transforms = np.tile(inactive, (M, 21, 1, 1))
+            all_transforms = np.tile(identity, (M, 21, 1, 1))
             for i in range(M):
                 if conf[i] > 0:
                     all_transforms[i] = joints_to_transforms(joint_3d[i])
@@ -135,7 +135,7 @@ def build_egodex_data(clip_ann, cam_K, cam_pose, frame_indices):
                 transforms_dict[name] = all_transforms[:, mano_idx]
                 confidences_dict[name] = conf.copy()
             else:
-                transforms_dict[name] = np.tile(inactive, (M, 1, 1))
+                transforms_dict[name] = np.tile(identity, (M, 1, 1))
                 confidences_dict[name] = np.zeros(M, dtype=np.float32)
 
         for suffix, (idx_a, idx_b) in METACARPAL_INTERPOLATION.items():
@@ -150,11 +150,11 @@ def build_egodex_data(clip_ann, cam_K, cam_pose, frame_indices):
                         direction = joint_3d[i, idx_b] - joint_3d[i, idx_a]
                         mc[i] = make_transform(pos, direction)
                     else:
-                        mc[i] = inactive
+                        mc[i] = identity
                 transforms_dict[name] = mc
                 confidences_dict[name] = conf.copy()
             else:
-                transforms_dict[name] = np.tile(inactive, (M, 1, 1))
+                transforms_dict[name] = np.tile(identity, (M, 1, 1))
                 confidences_dict[name] = np.zeros(M, dtype=np.float32)
 
     return cam_K.astype(np.float32), transforms_dict, confidences_dict

@@ -152,7 +152,8 @@ def get_cam_pose(cam_params: dict) -> np.ndarray:
     cam_pose (cam-to-world): R_cw = R^T, t_cw = -R^T @ t
     """
     R = np.array(cam_params['R'], dtype=np.float32).reshape(3, 3)
-    t = np.array(cam_params['t'], dtype=np.float32).reshape(3)
+    # ReInterHand stores t in mm; convert to meters.
+    t = np.array(cam_params['t'], dtype=np.float32).reshape(3) / 1000.0
 
     cam_pose = np.eye(4, dtype=np.float32)
     cam_pose[:3, :3] = R.T
@@ -209,7 +210,8 @@ def load_keypoints(kp_dir: str, frame_id: str) -> np.ndarray:
         return None
     with open(path) as f:
         data = json.load(f)
-    return np.array(data, dtype=np.float32).reshape(42, 3)
+    # ReInterHand stores keypoints in mm; convert to meters.
+    return np.array(data, dtype=np.float32).reshape(42, 3) / 1000.0
 
 
 def load_mano_params(mano_dir: str, frame_id: str, side: str):
@@ -321,7 +323,7 @@ def build_egodex_data_for_camera(
             mano = mano_cache.get((fid, side))
             if mano is not None:
                 poses_arr[i] = np.array(mano['pose'], dtype=np.float64)
-                trans_arr[i] = np.array(mano['trans'], dtype=np.float64)
+                trans_arr[i] = np.array(mano['trans'], dtype=np.float64) / 1000.0
                 if betas_ref == "right_betas" and right_betas is None:
                     right_betas = np.array(mano['shape'], dtype=np.float32)
                 elif betas_ref == "left_betas" and left_betas is None:

@@ -128,7 +128,8 @@ def get_cam_extrinsic(cameras: dict, capture_id: str, cam_id: str) -> np.ndarray
 
     Returns cam_pose (4x4) that maps camera->world (inverse of extrinsic).
     """
-    campos = np.array(cameras[capture_id]['campos'][cam_id], dtype=np.float32).reshape(3)
+    # InterHand2.6M stores campos/camrot in mm; convert to meters.
+    campos = np.array(cameras[capture_id]['campos'][cam_id], dtype=np.float32).reshape(3) / 1000.0
     camrot = np.array(cameras[capture_id]['camrot'][cam_id], dtype=np.float32).reshape(3, 3)
 
     # camrot is world-to-camera rotation, campos is camera position in world
@@ -267,7 +268,8 @@ def build_egodex_data_for_camera(
 
     for i, (frame_idx_str, seq_name) in enumerate(frame_list):
         frame_joints = joints[capture_id][frame_idx_str]
-        world_coord = np.array(frame_joints['world_coord'], dtype=np.float32).reshape(42, 3)
+        # InterHand2.6M stores world_coord in mm; convert to meters.
+        world_coord = np.array(frame_joints['world_coord'], dtype=np.float32).reshape(42, 3) / 1000.0
         joint_valid = np.array(frame_joints['joint_valid'], dtype=np.float32).flatten()
 
         # Right hand (IH26M indices 0-20)
@@ -297,13 +299,13 @@ def build_egodex_data_for_camera(
 
         if mano_frame.get('right') is not None:
             right_poses[i] = np.array(mano_frame['right']['pose'], dtype=np.float64)
-            right_trans[i] = np.array(mano_frame['right']['trans'], dtype=np.float64)
+            right_trans[i] = np.array(mano_frame['right']['trans'], dtype=np.float64) / 1000.0
             if right_betas is None:
                 right_betas = np.array(mano_frame['right']['shape'], dtype=np.float32)
 
         if mano_frame.get('left') is not None:
             left_poses[i] = np.array(mano_frame['left']['pose'], dtype=np.float64)
-            left_trans[i] = np.array(mano_frame['left']['trans'], dtype=np.float64)
+            left_trans[i] = np.array(mano_frame['left']['trans'], dtype=np.float64) / 1000.0
             if left_betas is None:
                 left_betas = np.array(mano_frame['left']['shape'], dtype=np.float32)
 
