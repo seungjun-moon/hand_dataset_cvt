@@ -16,6 +16,10 @@ logs/
 
 # Claude Code
 .claude/
+CLAUDE.md
+
+# Misc
+nohup.out
 
 # Python
 __pycache__/
