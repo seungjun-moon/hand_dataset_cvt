@@ -75,8 +75,11 @@ def save_completed(path: str, completed: set):
 
 
 def download_video(video_id: str, video_info: dict, output_dir: str,
-                    timeout: int = 300) -> str:
-    """Download a YouTube video with timeout. Returns path to downloaded file.
+                    timeout: int = 600, cookies_file: str = None) -> str:
+    """Download a YouTube video using yt-dlp. Returns path to downloaded file.
+
+    Uses yt-dlp which is more robust against bot detection than pytubefix.
+    Supports browser cookies for authentication to avoid rate limiting.
 
     Raises RuntimeError with message starting with:
         "UNAVAILABLE:" — video is permanently gone, should not retry
@@ -84,9 +87,8 @@ def download_video(video_id: str, video_info: dict, output_dir: str,
         "BOT:" — rate-limited by YouTube, retry later
         Other — transient errors, retry possible
     """
-    import multiprocessing
-    import multiprocessing.queues
-    from queue import Empty
+    import subprocess
+    import time
 
     out_path = os.path.join(output_dir, f"{video_id}.mp4")
     if os.path.exists(out_path):
@@ -94,62 +96,67 @@ def download_video(video_id: str, video_info: dict, output_dir: str,
 
     os.makedirs(output_dir, exist_ok=True)
 
-    def _resolve_and_download(video_id, video_info, output_dir, result_q):
-        """Resolve stream and download in a subprocess (handles hangs)."""
-        try:
-            from pytubefix import YouTube
-            res = video_info["res"][0]
-            yt = YouTube(f"https://youtu.be/{video_id}")
-            stream = yt.streams.filter(
-                only_video=True, file_extension="mp4",
-                video_codec="avc1", res=f"{res}p",
-            ).first()
-            if stream is None:
-                stream = yt.streams.filter(
-                    only_video=True, file_extension="mp4", video_codec="avc1",
-                ).order_by("resolution").desc().first()
-            if stream is None:
-                stream = yt.streams.filter(
-                    only_video=True, file_extension="mp4",
-                ).order_by("resolution").desc().first()
-            if stream is None:
-                result_q.put(("UNAVAILABLE", f"no suitable stream for {video_id}"))
-                return
-            stream.download(output_path=output_dir, filename=f"{video_id}.mp4")
-            result_q.put(("OK", ""))
-        except Exception as e:
-            msg = str(e)
-            if "unavailable" in msg.lower() or "not available" in msg.lower():
-                result_q.put(("UNAVAILABLE", msg))
-            elif "bot" in msg.lower():
-                result_q.put(("BOT", msg))
-            else:
-                result_q.put(("ERROR", msg))
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    res = video_info["res"][0]
 
-    result_q = multiprocessing.Queue()
-    proc = multiprocessing.Process(
-        target=_resolve_and_download,
-        args=(video_id, video_info, output_dir, result_q))
-    proc.start()
-    proc.join(timeout=timeout)
+    # Build yt-dlp command with anti-bot measures
+    cmd = [
+        "yt-dlp",
+        "--no-warnings",
+        "--no-playlist",
+        # Prefer h264 mp4 at target resolution, fall back to best mp4
+        "-f", f"bestvideo[height<={res}][ext=mp4][vcodec^=avc1]/bestvideo[ext=mp4][vcodec^=avc1]/bestvideo[ext=mp4]/best[ext=mp4]",
+        # Output path
+        "-o", out_path,
+        # Anti-bot: randomize client, use extractor retries
+        "--extractor-retries", "3",
+        "--retry-sleep", "extractor:5",
+        "--sleep-requests", "1",
+        # No post-processing, keep original
+        "--no-post-overwrites",
+    ]
 
-    if proc.is_alive():
-        proc.kill()
-        proc.join()
+    # Use cookies file if provided for authentication
+    if cookies_file and os.path.exists(cookies_file):
+        cmd.extend(["--cookies", cookies_file])
+
+    cmd.append(url)
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
         if os.path.exists(out_path):
             os.remove(out_path)
+        # Also clean up partial .part files
+        part_path = out_path + ".part"
+        if os.path.exists(part_path):
+            os.remove(part_path)
         raise RuntimeError(f"TIMEOUT: exceeded {timeout}s")
 
-    # Get result from subprocess
-    try:
-        status, msg = result_q.get_nowait()
-    except Empty:
-        status, msg = "ERROR", f"process exited with code {proc.exitcode}"
-
-    if status != "OK":
+    if result.returncode != 0:
+        stderr = result.stderr + result.stdout
         if os.path.exists(out_path):
             os.remove(out_path)
-        raise RuntimeError(f"{status}: {msg}")
+        part_path = out_path + ".part"
+        if os.path.exists(part_path):
+            os.remove(part_path)
+
+        stderr_lower = stderr.lower()
+        if any(kw in stderr_lower for kw in [
+            "unavailable", "not available", "private video",
+            "video has been removed", "account terminated",
+            "this video is not available", "copyright",
+            "private", "been removed", "does not exist",
+        ]):
+            raise RuntimeError(f"UNAVAILABLE: {stderr[:200]}")
+        elif any(kw in stderr_lower for kw in [
+            "sign in to confirm", "bot", "captcha",
+            "too many requests", "429",
+        ]):
+            raise RuntimeError(f"BOT: {stderr[:200]}")
+        else:
+            raise RuntimeError(f"ERROR: {stderr[:200]}")
 
     if not os.path.exists(out_path):
         raise RuntimeError(f"Download completed but file not found")
@@ -402,8 +409,12 @@ def extract_frames_to_mp4(
 
 
 def convert_whim(src_dir: str, dst_dir: str, mode: str,
-                 fps: float = 30.0, max_samples: int = 0):
+                 fps: float = 30.0, max_samples: int = 0,
+                 cookies_file: str = None, delay: float = 2.0):
     """Convert WHIM videos to egodex format."""
+    import random
+    import time
+
     # Load video list
     video_ids_path = os.path.join(src_dir, "whim", f"{mode}_video_ids.json")
     with open(video_ids_path) as f:
@@ -423,6 +434,7 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
     video_ids = sorted(video_dict.keys())
     total = len(video_ids)
     converted = 0
+    bot_count = 0  # Track consecutive bot detections
 
     for seq_idx, video_id in enumerate(video_ids):
         if max_samples > 0 and converted >= max_samples:
@@ -442,16 +454,17 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
 
         # Download video
         try:
-            video_path = download_video(video_id, video_info, videos_dir)
+            video_path = download_video(
+                video_id, video_info, videos_dir,
+                cookies_file=cookies_file)
             print(f"  Downloaded.", flush=True)
+            bot_count = 0  # Reset on success
         except Exception as e:
             msg = str(e)
             print(f"  FAILED download: {msg}")
-            # Only permanently skip truly unavailable videos
-            if msg.startswith("UNAVAILABLE:"):
+            if not msg.startswith("BOT:"):
                 failed_set.add(video_id)
                 save_completed(failed_path, failed_set)
-            # BOT/TIMEOUT/other errors: don't save to failed, will retry next run
             continue
 
         # Build egodex data
@@ -508,6 +521,10 @@ def convert_whim(src_dir: str, dst_dir: str, mode: str,
         save_completed(completed_path, completed)
         converted += 1
 
+        # Random delay between downloads to avoid bot detection
+        sleep_time = delay + random.uniform(0, delay)
+        time.sleep(sleep_time)
+
     print(f"\nDone. Converted {converted} videos, {len(failed_set)} failed.")
     if failed_set:
         print(f"Failed: {sorted(failed_set)}")
@@ -524,10 +541,15 @@ def main():
     parser.add_argument("--fps", type=float, default=30.0, help="Output video FPS")
     parser.add_argument("--max-samples", type=int, default=0,
                         help="Max videos to convert (0=all)")
+    parser.add_argument("--cookies", default=None,
+                        help="Path to cookies.txt file (Netscape format) for YouTube auth")
+    parser.add_argument("--delay", type=float, default=2.0,
+                        help="Base delay (seconds) between downloads to avoid bot detection")
     args = parser.parse_args()
 
     convert_whim(args.src, args.dst, mode=args.mode,
-                 fps=args.fps, max_samples=args.max_samples)
+                 fps=args.fps, max_samples=args.max_samples,
+                 cookies_file=args.cookies, delay=args.delay)
 
 
 if __name__ == "__main__":

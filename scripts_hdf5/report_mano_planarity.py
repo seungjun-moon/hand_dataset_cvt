@@ -167,6 +167,9 @@ def analyze_dataset(dataset, vanilla_anns, constrained_anns, mano_models, device
     all_plan_vanilla = []
     all_plan_constrained = []
     all_vertex_err = []
+    all_joint_err = []
+    per_finger_v = {}
+    per_finger_c = {}
 
     for is_right, sample_ids in [(True, mano_ids_right), (False, mano_ids_left)]:
         if not sample_ids:
@@ -174,7 +177,6 @@ def analyze_dataset(dataset, vanilla_anns, constrained_anns, mano_models, device
         side_key = "right" if is_right else "left"
         model = mano_models[side_key]
 
-        # Collect batch arrays
         v_poses = np.array([vanilla_anns[s]["hand_pose"] for s in sample_ids], dtype=np.float32)
         v_betas = np.array([vanilla_anns[s]["betas"] for s in sample_ids], dtype=np.float32)
         c_poses = np.array([constrained_anns[s]["hand_pose"] for s in sample_ids], dtype=np.float32)
@@ -184,10 +186,8 @@ def analyze_dataset(dataset, vanilla_anns, constrained_anns, mano_models, device
         for start in range(0, N, batch_size):
             end = min(start + batch_size, N)
 
-            # Vanilla forward
             j16_v, verts_v = mano_forward_batch(
                 model, v_poses[start:end], v_betas[start:end], device)
-            # Constrained forward
             j16_c, verts_c = mano_forward_batch(
                 model, c_poses[start:end], c_betas[start:end], device)
 
@@ -204,39 +204,25 @@ def analyze_dataset(dataset, vanilla_anns, constrained_anns, mano_models, device
                 v_err = np.mean(np.linalg.norm(verts_v[i] - verts_c[i], axis=1))
                 all_vertex_err.append(v_err)
 
-    plan_v = np.array(all_plan_vanilla) * 1000  # mm
-    plan_c = np.array(all_plan_constrained) * 1000
-    v_err = np.array(all_vertex_err) * 1000
+                # Joint error: mean per-joint L2 distance (21 joints)
+                j_err = np.mean(np.linalg.norm(j21_v - j21_c, axis=1))
+                all_joint_err.append(j_err)
 
-    # Per-finger planarity (vanilla)
-    per_finger_v = {}
-    per_finger_c = {}
-    for is_right, sample_ids in [(True, mano_ids_right), (False, mano_ids_left)]:
-        if not sample_ids:
-            continue
-        side_key = "right" if is_right else "left"
-        model = mano_models[side_key]
-        v_poses = np.array([vanilla_anns[s]["hand_pose"] for s in sample_ids], dtype=np.float32)
-        v_betas = np.array([vanilla_anns[s]["betas"] for s in sample_ids], dtype=np.float32)
-        c_poses = np.array([constrained_anns[s]["hand_pose"] for s in sample_ids], dtype=np.float32)
-        c_betas = np.array([constrained_anns[s]["betas"] for s in sample_ids], dtype=np.float32)
-
-        N = len(sample_ids)
-        for start in range(0, N, batch_size):
-            end = min(start + batch_size, N)
-            j16_v, verts_v = mano_forward_batch(model, v_poses[start:end], v_betas[start:end], device)
-            j16_c, verts_c = mano_forward_batch(model, c_poses[start:end], c_betas[start:end], device)
-            for i in range(end - start):
-                j21_v = build_joints_21(j16_v[i], verts_v[i])
-                j21_c = build_joints_21(j16_c[i], verts_c[i])
+                # Per-finger planarity
                 for fname, indices in MANO_FINGER_INDICES.items():
                     ev = planarity_error(j21_v[indices]) * 1000
                     ec = planarity_error(j21_c[indices]) * 1000
                     per_finger_v.setdefault(fname, []).append(ev)
                     per_finger_c.setdefault(fname, []).append(ec)
 
-    # Correlation
-    corr = float(np.corrcoef(plan_v, v_err)[0, 1]) if len(plan_v) > 2 else 0.0
+    plan_v = np.array(all_plan_vanilla) * 1000  # mm
+    plan_c = np.array(all_plan_constrained) * 1000
+    v_err = np.array(all_vertex_err) * 1000
+    j_err = np.array(all_joint_err) * 1000
+
+    # Correlations
+    corr_vertex = float(np.corrcoef(plan_v, v_err)[0, 1]) if len(plan_v) > 2 else 0.0
+    corr_joint = float(np.corrcoef(plan_v, j_err)[0, 1]) if len(plan_v) > 2 else 0.0
 
     return {
         "n_samples": n_total,
@@ -250,7 +236,11 @@ def analyze_dataset(dataset, vanilla_anns, constrained_anns, mano_models, device
         "vertex_error_mean": float(np.mean(v_err)),
         "vertex_error_median": float(np.median(v_err)),
         "vertex_error_max": float(np.max(v_err)),
-        "correlation": corr,
+        "joint_error_mean": float(np.mean(j_err)),
+        "joint_error_median": float(np.median(j_err)),
+        "joint_error_max": float(np.max(j_err)),
+        "corr_vertex": corr_vertex,
+        "corr_joint": corr_joint,
     }
 
 
@@ -269,19 +259,21 @@ def write_report(results, out_path, args):
     # Summary table
     lines.append("## Summary")
     lines.append("")
-    lines.append("| Dataset | Samples | Planarity Vanilla (mm) | Planarity Constrained (mm) | Vertex Error (mm) | Correlation |")
-    lines.append("|---------|--------:|----------------------:|--------------------------:|------------------:|------------:|")
+    lines.append("| Dataset | Samples | Plan. Vanilla (mm) | Plan. Constrained (mm) | Joint Err (mm) | Vertex Err (mm) | Corr (joint) | Corr (vertex) |")
+    lines.append("|---------|--------:|-------------------:|-----------------------:|---------------:|----------------:|-------------:|--------------:|")
 
     for ds, r in sorted(results.items()):
         if r is None or r.get("n_mano_samples", 0) == 0:
-            lines.append(f"| {ds} | {r['n_samples'] if r else 0} | - | - | - | - |")
+            lines.append(f"| {ds} | {r['n_samples'] if r else 0} | - | - | - | - | - | - |")
             continue
         lines.append(
             f"| {ds} | {r['n_mano_samples']} "
             f"| {r['planarity_vanilla_mean']:.2f} "
             f"| {r['planarity_constrained_mean']:.2f} "
+            f"| {r['joint_error_mean']:.2f} "
             f"| {r['vertex_error_mean']:.2f} "
-            f"| {r['correlation']:.3f} |"
+            f"| {r['corr_joint']:.3f} "
+            f"| {r['corr_vertex']:.3f} |"
         )
 
     # Per-finger breakdown
@@ -321,51 +313,52 @@ def write_report(results, out_path, args):
             f"| {pf.get('Little', 0):.2f} |"
         )
 
-    # Vertex error details
+    # Joint & vertex error details
     lines.append("")
-    lines.append("## Vertex Error Details (mm)")
+    lines.append("## Joint & Vertex Error Details (mm)")
     lines.append("")
-    lines.append("Vertex error = mean per-vertex L2 distance between vanilla and constrained MANO meshes.")
+    lines.append("Joint error = mean per-joint L2 distance (21 joints) between vanilla and constrained MANO.")
+    lines.append("Vertex error = mean per-vertex L2 distance (778 vertices) between vanilla and constrained MANO.")
     lines.append("")
-    lines.append("| Dataset | Mean | Median | Max |")
-    lines.append("|---------|-----:|-------:|----:|")
+    lines.append("| Dataset | Joint Mean | Joint Median | Joint Max | Vertex Mean | Vertex Median | Vertex Max |")
+    lines.append("|---------|----------:|-----------:|----------:|----------:|--------------:|-----------:|")
     for ds, r in sorted(results.items()):
         if r is None or r.get("n_mano_samples", 0) == 0:
             continue
         lines.append(
             f"| {ds} "
+            f"| {r['joint_error_mean']:.2f} "
+            f"| {r['joint_error_median']:.2f} "
+            f"| {r['joint_error_max']:.2f} "
             f"| {r['vertex_error_mean']:.2f} "
             f"| {r['vertex_error_median']:.2f} "
             f"| {r['vertex_error_max']:.2f} |"
         )
 
     # Correlation analysis
+    def _interp(corr):
+        if corr > 0.7: return "Strong positive"
+        if corr > 0.4: return "Moderate positive"
+        if corr > 0.2: return "Weak positive"
+        if corr > -0.2: return "No correlation"
+        if corr > -0.4: return "Weak negative"
+        return "Moderate/strong negative"
+
     lines.append("")
-    lines.append("## Correlation: Planarity Error vs Vertex Error")
+    lines.append("## Correlation: Planarity Error vs Joint/Vertex Error")
     lines.append("")
     lines.append("Pearson correlation between per-sample mean planarity error (vanilla MANO)")
-    lines.append("and per-sample mean vertex error (vanilla vs constrained).")
+    lines.append("and per-sample mean joint/vertex error (vanilla vs constrained).")
     lines.append("Higher correlation means samples with worse planarity see larger mesh changes after constrained IK.")
     lines.append("")
-    lines.append("| Dataset | Pearson r | Interpretation |")
-    lines.append("|---------|----------:|----------------|")
+    lines.append("| Dataset | Corr (joint) | Interp | Corr (vertex) | Interp |")
+    lines.append("|---------|-------------:|--------|---------------:|--------|")
     for ds, r in sorted(results.items()):
         if r is None or r.get("n_mano_samples", 0) == 0:
             continue
-        corr = r["correlation"]
-        if corr > 0.7:
-            interp = "Strong positive"
-        elif corr > 0.4:
-            interp = "Moderate positive"
-        elif corr > 0.2:
-            interp = "Weak positive"
-        elif corr > -0.2:
-            interp = "No correlation"
-        elif corr > -0.4:
-            interp = "Weak negative"
-        else:
-            interp = "Moderate/strong negative"
-        lines.append(f"| {ds} | {corr:.3f} | {interp} |")
+        cj = r["corr_joint"]
+        cv = r["corr_vertex"]
+        lines.append(f"| {ds} | {cj:.3f} | {_interp(cj)} | {cv:.3f} | {_interp(cv)} |")
 
     lines.append("")
 
@@ -437,8 +430,10 @@ def main():
             print(f"  MANO samples: {r['n_mano_samples']}")
             print(f"  Planarity vanilla:     {r['planarity_vanilla_mean']:.2f} mm")
             print(f"  Planarity constrained: {r['planarity_constrained_mean']:.2f} mm")
+            print(f"  Joint error:           {r['joint_error_mean']:.2f} mm")
             print(f"  Vertex error:          {r['vertex_error_mean']:.2f} mm")
-            print(f"  Correlation:           {r['correlation']:.3f}")
+            print(f"  Corr (joint):          {r['corr_joint']:.3f}")
+            print(f"  Corr (vertex):         {r['corr_vertex']:.3f}")
         else:
             print(f"  No MANO samples")
 

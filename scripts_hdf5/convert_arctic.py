@@ -365,15 +365,16 @@ def convert_arctic(src_dir, dst_dir, cameras=None, fps=30.0,
         for mano_file in mano_files:
             seq_name = mano_file.replace(".mano.npy", "")
             obj_name = seq_name.split("_")[0]
-            clusters.setdefault(obj_name, []).append((subject, seq_name))
+            cluster_key = f"{obj_name}_{subject}"
+            clusters.setdefault(cluster_key, []).append((subject, seq_name))
 
     if cameras is None:
         cameras = list(range(9))
 
     global_count = 0
-    for obj_name in sorted(clusters.keys()):
-        sequences = clusters[obj_name]
-        obj_dir = os.path.join(dst_dir, obj_name)
+    for cluster_key in sorted(clusters.keys()):
+        sequences = clusters[cluster_key]
+        obj_dir = os.path.join(dst_dir, cluster_key)
         os.makedirs(obj_dir, exist_ok=True)
 
         for seq_idx, (subject, seq_name) in enumerate(sequences):
@@ -409,7 +410,7 @@ def convert_arctic(src_dir, dst_dir, cameras=None, fps=30.0,
                         mano_layers,
                     )
 
-                print(f"[{obj_name}/{seq_idx:06d}] {subject}/{seq_name} "
+                print(f"[{cluster_key}/{seq_idx:06d}] {subject}/{seq_name} "
                       f"(cam={cam_idx:02d}, frames={num_frames})")
 
                 prefix = f"{seq_idx:06d}"
