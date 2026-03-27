@@ -20,7 +20,9 @@ logs/
 
 # Claude Code
 .claude/
-CLAUDE.md
+
+# Slurm scripts
+slurm/
 
 # Misc
 nohup.out
