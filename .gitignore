@@ -11,6 +11,10 @@ DATASET/
 CONVERTED/
 CROPPED/
 
+# Data and outputs
+_DATA/
+outputs/
+
 # Logs
 logs/
 
