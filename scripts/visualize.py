@@ -13,8 +13,12 @@ Usage:
     python scripts/visualize.py --src CONVERTED/ho_cap --n 10 --out outputs --seed 0
     python scripts/visualize.py --src CONVERTED/freihand_train --n 100 --out outputs --seed 0
     python scripts/visualize.py --src CONVERTED/interhand26m_train --n 20 --out outputs --seed 0
-    python scripts/visualize.py --src ../hamer/hamer_training_data/dataset_tars/freihand-train --n 20
-    python scripts/visualize.py --src ../hamer/hamer_training_data/dataset_tars/ho3d-train --n 20 --mano-dir /path/to/mano
+    python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/freihand-train --n 20
+    python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/ho3d-train --n 20 --mano-dir /path/to/mano
+    python scripts/visualize.py --src ../hand_tracking_ablation/hamer_evaluation_data/dataset_tars/arctic-train --n 50
+
+
+python scripts/visualize.py --src test --n 50
 """
 
 import argparse
@@ -55,7 +59,7 @@ WRIST_COLOR = (0, 255, 0)  # green
 SIDE_COLORS = {"right": (0, 200, 0), "left": (200, 200, 0)}
 
 DEFAULT_MANO_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "hamer", "_DATA", "data", "mano"
+    os.path.dirname(__file__), "..", "_DATA", "data", "mano"
 )
 
 
@@ -215,8 +219,8 @@ def render_frame_npz(npz_path: str, img_path: str):
 def collect_samples_webdataset(src_dir: str, max_tars: int = 5):
     """Collect WebDataset samples: (tar_path, base_name)."""
     tar_files = sorted([f for f in os.listdir(src_dir) if f.endswith(".tar")])
-    if max_tars:
-        tar_files = tar_files[:max_tars]
+    if max_tars and len(tar_files) > max_tars:
+        tar_files = random.sample(tar_files, max_tars)
     samples = []
     for tar_name in tar_files:
         tar_path = os.path.join(src_dir, tar_name)
@@ -398,6 +402,21 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
 
     skel_img = _draw_webdataset_skeleton(img_bgr, kpts_2d)
 
+    # Project 3D keypoints to 2D and draw skeleton
+    proj3d_img = img_bgr.copy()
+    valid_3d = kpts_3d[:, 3] > 0.5
+    if valid_3d.any():
+        focal = _estimate_focal(kpts_3d, kpts_2d, img_size)
+        cx, cy = img_size / 2.0, img_size / 2.0
+        proj_2d = np.zeros((21, 3), dtype=np.float32)
+        for j in range(21):
+            if kpts_3d[j, 3] > 0.5:
+                z = max(kpts_3d[j, 2], 1e-4)
+                proj_2d[j, 0] = focal * kpts_3d[j, 0] / z + cx
+                proj_2d[j, 1] = focal * kpts_3d[j, 1] / z + cy
+                proj_2d[j, 2] = 1.0
+        proj3d_img = _draw_webdataset_skeleton(img_bgr, proj_2d)
+
     if has_pose:
         vertices, joints = _mano_forward(mano_model, hand_pose, betas, is_right, kpts_3d)
         focal = _estimate_focal(kpts_3d, kpts_2d, img_size)
@@ -411,10 +430,11 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
 
     side_label = "R" if is_right else "L"
     cv2.putText(skel_img, "2D Keypoints", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(proj3d_img, "Proj 3D", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     cv2.putText(mesh_img, "MANO Mesh", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     cv2.putText(skel_img, side_label, (img_size - 20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    return np.concatenate([skel_img, mesh_img], axis=1)
+    return np.concatenate([skel_img, proj3d_img, mesh_img], axis=1)
 
 
 # ── Shared drawing helper ──────────────────────────────────────────
