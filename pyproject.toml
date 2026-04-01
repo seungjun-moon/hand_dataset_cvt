@@ -1,0 +1,40 @@
+[project]
+name = "hand-dataset-cvt"
+version = "0.1.0"
+description = "Converts hand pose datasets into unified egodex-compatible format"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    # Core
+    "numpy==1.26.4",
+    "h5py==3.15.1",
+    "opencv-python==4.11.0.86",
+    "matplotlib==3.10.8",
+    "scikit-image==0.25.2",
+    "tqdm==4.67.2",
+    "pyyaml==6.0.3",
+    "pillow==12.1.0",
+    "webdataset==1.0.2",
+    # Hand model
+    "smplx==0.1.28",
+    "manopth @ git+https://github.com/hassony2/manopth.git",
+]
+
+[project.optional-dependencies]
+# PyTorch with CUDA 12.8 - install via:
+#   uv pip install torch==2.10.0+cu128 torchvision==0.25.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+torch = [
+    "torch==2.10.0+cu128",
+    "torchvision==0.25.0+cu128",
+]
+# Aria dataset support
+aria = [
+    "projectaria-tools==2.1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# PyTorch CUDA wheels are on a separate index
+extra-index-url = ["https://download.pytorch.org/whl/cu128"]

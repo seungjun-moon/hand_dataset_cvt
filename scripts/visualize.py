@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """Visualize randomly sampled frames with projected 3D keypoints.
 
-Reads CONVERTED datasets (HDF5+MP4 or NPZ+JPG) or HaMER WebDataset tars,
-projects world-space 3D keypoints to 2D, and draws skeleton overlays on images.
+Reads CONVERTED datasets (HDF5+MP4 or NPZ+JPG), HaMER WebDataset tars,
+or ClipDataset label directories (.data.pyd + per-sequence .pyd files).
 
 Automatically detects the dataset format:
   - HDF5: *_label_*.hdf5 + *_video_*.mp4 (video sequences)
   - NPZ:  *.npz + *.jpg (image-wise, e.g. FreiHAND)
   - WebDataset: *.tar containing {id}.jpg + {id}.data.pyd (HaMER format)
+  - ClipDataset: *_clip.data.pyd master index + per-sequence .pyd files
+                 (requires --img-dir for image root)
 
 Usage:
-    python scripts/visualize.py --src CONVERTED/ho_cap --n 10 --out outputs --seed 0
-    python scripts/visualize.py --src CONVERTED/freihand_train --n 100 --out outputs --seed 0
-    python scripts/visualize.py --src CONVERTED/interhand26m_train --n 20 --out outputs --seed 0
     python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/freihand-train --n 20
     python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/ho3d-train --n 20 --mano-dir /path/to/mano
-    python scripts/visualize.py --src ../hand_tracking_ablation/hamer_evaluation_data/dataset_tars/arctic-train --n 50
+    python scripts/visualize.py \
+    --src ../hand_tracking_ablation/_DATA/hamer_training_data/dataset_tars/reinterhand --n 50
 
-
-python scripts/visualize.py --src test --n 50
+python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/haptic_training_label/hot3d/clip \
+    --img-dir ../hand_tracking_ablation/_DATA/haptic_training_images/hot3d/images/ --n 20
 """
 
 import argparse
@@ -59,7 +59,7 @@ WRIST_COLOR = (0, 255, 0)  # green
 SIDE_COLORS = {"right": (0, 200, 0), "left": (200, 200, 0)}
 
 DEFAULT_MANO_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "_DATA", "data", "mano"
+    os.path.dirname(__file__), "..", "..", "hand_tracking_ablation", "_DATA", "data", "mano"
 )
 
 
@@ -72,6 +72,11 @@ def _joint_color(joint_idx: int):
 # ── Format detection ───────────────────────────────────────────────
 def detect_format(src_dir: str) -> str:
     """Detect dataset format by checking file extensions."""
+    # Check top-level for clipdataset master index files
+    for fname in os.listdir(src_dir):
+        if fname.endswith("_clip.data.pyd"):
+            return "clipdataset"
+
     # Check top-level for tar files (webdataset)
     for fname in os.listdir(src_dir):
         if fname.endswith(".tar"):
@@ -284,12 +289,56 @@ def _mano_forward(mano_model, hand_pose_aa, betas, is_right, kpts_3d=None):
     return vertices, joints
 
 
-def _estimate_focal(kpts_3d, kpts_2d, img_size):
+def _mano_forward_clip(mano_model, hand_pose_aa, betas, hand_tsl, cTw, is_right):
+    """Run MANO forward pass for ClipDataset: returns vertices/joints in camera space.
+
+    Uses hand_tsl for MANO translation, then applies cTw world-to-camera transform.
+    """
+    import torch
+    model = mano_model["right"] if is_right else mano_model["left"]
+
+    global_orient_aa = hand_pose_aa[:3]
+    hand_pose_aa_15 = hand_pose_aa[3:48].reshape(15, 3)
+
+    global_orient = torch.from_numpy(_axis_angle_to_rotmat(global_orient_aa)).unsqueeze(0).unsqueeze(0)
+    hand_pose = torch.stack(
+        [torch.from_numpy(_axis_angle_to_rotmat(hand_pose_aa_15[j])) for j in range(15)]
+    ).unsqueeze(0)
+    betas_t = torch.from_numpy(betas).unsqueeze(0).float()
+    transl_t = torch.from_numpy(hand_tsl).unsqueeze(0).float()
+
+    with torch.no_grad():
+        out = model(global_orient=global_orient, hand_pose=hand_pose,
+                    betas=betas_t, transl=transl_t, pose2rot=False)
+
+    verts_world = out.vertices[0].numpy()  # (778, 3) in world space
+    joints_world = out.joints[0].numpy()   # (16, 3) in world space
+
+    # Transform world -> camera using cTw
+    R_cw = cTw[:3, :3].astype(np.float64)
+    t_cw = cTw[:3, 3:4].astype(np.float64)
+    verts_cam = (R_cw @ verts_world.T + t_cw).T.astype(np.float32)
+    joints_cam = (R_cw @ joints_world.T + t_cw).T.astype(np.float32)
+
+    return verts_cam, joints_cam
+
+
+def _estimate_focal(kpts_3d, kpts_2d, img_w, img_h=None):
+    """Estimate focal length from 3D-2D correspondences assuming centered PP.
+
+    Args:
+        kpts_3d: (21, 4) camera-space keypoints with confidence.
+        kpts_2d: (21, 3) pixel keypoints with confidence.
+        img_w: image width (or img_size for square images).
+        img_h: image height (defaults to img_w for square images).
+    """
+    if img_h is None:
+        img_h = img_w
     valid = (kpts_2d[:, 2] > 0.5) & (kpts_3d[:, 3] > 0.5)
     if valid.sum() < 3:
         return 5000.0
 
-    cx, cy = img_size / 2.0, img_size / 2.0
+    cx, cy = img_w / 2.0, img_h / 2.0
     kp2 = kpts_2d[valid, :2]
     kp3 = kpts_3d[valid, :3]
     z = kp3[:, 2]
@@ -365,6 +414,59 @@ def _render_mesh_cpu(image, vertices, faces, cam_t, focal_length,
     return output
 
 
+def _render_mesh_cpu_K(image, vertices, faces, K, mesh_color=(220, 220, 200), alpha=0.6):
+    """Render MANO mesh on image using full K intrinsic matrix for projection."""
+    H, W = image.shape[:2]
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    z = np.clip(vertices[:, 2:3], 1e-4, None)
+    px = fx * vertices[:, 0:1] / z + cx
+    py = fy * vertices[:, 1:2] / z + cy
+    proj = np.concatenate([px, py], axis=1)
+
+    face_z = vertices[faces, 2].mean(axis=1)
+    order = np.argsort(-face_z)
+
+    v0 = vertices[faces[:, 0]]
+    v1 = vertices[faces[:, 1]]
+    v2 = vertices[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0)
+    norms = np.clip(np.linalg.norm(normals, axis=1, keepdims=True), 1e-8, None)
+    normals = normals / norms
+
+    light_dir = np.array([0, 0, -1], dtype=np.float32)
+    shade = np.abs(np.sum(normals * light_dir, axis=1))
+    shade = 0.3 + 0.7 * shade
+
+    overlay = image.copy()
+    base_color = np.array(mesh_color, dtype=np.float32)
+    for fi in order:
+        tri = proj[faces[fi]].astype(np.int32)
+        if face_z[fi] < 0.01:
+            continue
+        if np.any(tri[:, 0] < -W) or np.any(tri[:, 0] > 2 * W):
+            continue
+        if np.any(tri[:, 1] < -H) or np.any(tri[:, 1] > 2 * H):
+            continue
+        color = (base_color * shade[fi]).astype(np.uint8).tolist()
+        pts = tri.reshape(-1, 1, 2)
+        cv2.fillConvexPoly(overlay, pts, color, cv2.LINE_AA)
+
+    output = cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
+
+    for fi in order:
+        tri = proj[faces[fi]].astype(np.int32)
+        if face_z[fi] < 0.01:
+            continue
+        for j in range(3):
+            p1 = tuple(tri[j])
+            p2 = tuple(tri[(j + 1) % 3])
+            cv2.line(output, p1, p2, (100, 100, 100), 1, cv2.LINE_AA)
+
+    return output
+
+
 def _draw_webdataset_skeleton(image, kpts_2d):
     """Draw 2D skeleton. kpts_2d is (21, 3) with [x_px, y_px, conf]."""
     img = image.copy()
@@ -374,6 +476,7 @@ def _draw_webdataset_skeleton(image, kpts_2d):
         x = int(round(kpts_2d[i, 0]))
         y = int(round(kpts_2d[i, 1]))
         color = _joint_color(i)
+        print(x, y, kpts_2d[i])
         cv2.circle(img, (x, y), 4, color, -1, cv2.LINE_AA)
         cv2.circle(img, (x, y), 4, (0, 0, 0), 1, cv2.LINE_AA)
         p = PARENTS[i]
@@ -398,7 +501,7 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
     betas = ann["betas"]
     kpts_2d = ann["keypoints_2d"]
     kpts_3d = ann["keypoints_3d"]
-    img_size = img_bgr.shape[0]
+    img_h, img_w = img_bgr.shape[:2]
 
     skel_img = _draw_webdataset_skeleton(img_bgr, kpts_2d)
 
@@ -406,8 +509,8 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
     proj3d_img = img_bgr.copy()
     valid_3d = kpts_3d[:, 3] > 0.5
     if valid_3d.any():
-        focal = _estimate_focal(kpts_3d, kpts_2d, img_size)
-        cx, cy = img_size / 2.0, img_size / 2.0
+        focal = _estimate_focal(kpts_3d, kpts_2d, img_w, img_h)
+        cx, cy = img_w / 2.0, img_h / 2.0
         proj_2d = np.zeros((21, 3), dtype=np.float32)
         for j in range(21):
             if kpts_3d[j, 3] > 0.5:
@@ -419,7 +522,7 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
 
     if has_pose:
         vertices, joints = _mano_forward(mano_model, hand_pose, betas, is_right, kpts_3d)
-        focal = _estimate_focal(kpts_3d, kpts_2d, img_size)
+        focal = _estimate_focal(kpts_3d, kpts_2d, img_w, img_h)
         cam_t = np.zeros(3, dtype=np.float32)
         faces = faces_right if is_right else faces_left
         mesh_color = (200, 220, 255) if is_right else (255, 230, 200)
@@ -432,9 +535,162 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
     cv2.putText(skel_img, "2D Keypoints", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     cv2.putText(proj3d_img, "Proj 3D", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     cv2.putText(mesh_img, "MANO Mesh", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-    cv2.putText(skel_img, side_label, (img_size - 20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    cv2.putText(skel_img, side_label, (img_w - 20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
     return np.concatenate([skel_img, proj3d_img, mesh_img], axis=1)
+
+
+# ── ClipDataset format ────────────────────────────────────────────
+
+def _decode_clipdataset_imgname(s):
+    """Decode imgname from ClipDataset labels, stripping absolute cluster prefixes."""
+    s = s.decode('utf-8') if isinstance(s, bytes) else str(s)
+    if os.path.isabs(s):
+        for marker in ('images_zips/',):
+            idx = s.find(marker)
+            if idx != -1:
+                return s[idx + len(marker):]
+        return s.lstrip('/')
+    return s
+
+
+def collect_samples_clipdataset(src_dir: str, max_seqs: int = 50):
+    """Collect ClipDataset samples: (label_path, frame_idx).
+
+    Reads *_clip.data.pyd master index files to find per-sequence .pyd labels,
+    then picks random frames from each sequence.
+    """
+    master_files = [f for f in os.listdir(src_dir) if f.endswith("_clip.data.pyd")]
+    if not master_files:
+        return []
+
+    all_label_paths = []
+    for mf in master_files:
+        master = np.load(os.path.join(src_dir, mf), allow_pickle=True)
+        label_dir = src_dir
+        for lname in master["labelname"]:
+            lpath = os.path.join(label_dir, str(lname))
+            if os.path.exists(lpath):
+                all_label_paths.append(lpath)
+
+    if len(all_label_paths) > max_seqs:
+        all_label_paths = random.sample(all_label_paths, max_seqs)
+
+    samples = []
+    for lpath in all_label_paths:
+        data = np.load(lpath, allow_pickle=True)
+        T = len(data["imgname"])
+        frame_idx = random.randint(0, T - 1)
+        samples.append((lpath, frame_idx))
+    return samples
+
+
+def render_frame_clipdataset(label_path: str, frame_idx: int, img_dir: str,
+                             mano_model=None, faces_right=None, faces_left=None):
+    """Render a ClipDataset frame with GT 2D skeleton, projected 3D skeleton, and MANO mesh."""
+    data = np.load(label_path, allow_pickle=True)
+
+    imgname_raw = data["imgname"][frame_idx]
+    imgname_rel = _decode_clipdataset_imgname(imgname_raw)
+    img_path = os.path.join(img_dir, imgname_rel)
+    img_bgr = cv2.imread(img_path)
+    if img_bgr is None:
+        print(f"  Cannot read image: {img_path}")
+        return None
+
+    kp2d = data["hand_keypoints_2d"][frame_idx]  # (21, 3)
+    kp3d = data["hand_keypoints_3d"][frame_idx]  # (21, 4)
+    K = data["focal"][frame_idx]                  # (3, 3)
+    is_right = bool(data["right"][frame_idx])
+    img_h, img_w = img_bgr.shape[:2]
+
+    # Panel 1: GT 2D keypoints
+    skel_2d_img = _draw_webdataset_skeleton(img_bgr, kp2d)
+
+    # Panel 2: Projected 3D keypoints (kp3d is in camera space, project with K)
+    proj3d_img = img_bgr.copy()
+    valid_3d = kp3d[:, 3] > 0.5
+    proj_2d = np.zeros((21, 3), dtype=np.float32)
+    if valid_3d.any():
+        pts_cam = kp3d[valid_3d, :3]
+        pts_proj = (K @ pts_cam.T).T
+        z = np.clip(pts_proj[:, 2:3], 1e-8, None)
+        pts_px = pts_proj[:, :2] / z
+        proj_2d[valid_3d, :2] = pts_px
+        proj_2d[valid_3d, 2] = 1.0
+        proj3d_img = _draw_webdataset_skeleton(img_bgr, proj_2d)
+
+    # Panel 3: Error overlay (both skeletons on same image, GT=green, proj=red)
+    error_img = img_bgr.copy()
+    valid_both = (kp2d[:, 2] > 0.5) & valid_3d
+    if valid_both.any():
+        gt_pts = kp2d[valid_both, :2]
+        pr_pts = proj_2d[valid_both, :2]
+        errors = np.linalg.norm(gt_pts - pr_pts, axis=1)
+        mean_err = errors.mean()
+        max_err = errors.max()
+
+        # Draw GT in green
+        for i in range(21):
+            if kp2d[i, 2] < 0.5:
+                continue
+            x, y = int(round(kp2d[i, 0])), int(round(kp2d[i, 1]))
+            cv2.circle(error_img, (x, y), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        # Draw projected in red
+        for i in range(21):
+            if proj_2d[i, 2] < 0.5:
+                continue
+            x, y = int(round(proj_2d[i, 0])), int(round(proj_2d[i, 1]))
+            cv2.circle(error_img, (x, y), 3, (0, 0, 255), -1, cv2.LINE_AA)
+        # Draw error lines
+        for i in range(21):
+            if kp2d[i, 2] > 0.5 and proj_2d[i, 2] > 0.5:
+                p1 = (int(round(kp2d[i, 0])), int(round(kp2d[i, 1])))
+                p2 = (int(round(proj_2d[i, 0])), int(round(proj_2d[i, 1])))
+                cv2.line(error_img, p1, p2, (255, 255, 0), 1, cv2.LINE_AA)
+
+        cv2.putText(error_img, f"mean:{mean_err:.1f}px max:{max_err:.1f}px",
+                    (5, img_h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+    else:
+        cv2.putText(error_img, "No valid overlap", (5, img_h - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+    # Panel 4: MANO mesh rendering
+    has_pose = bool(data["has_hand_pose"][frame_idx])
+    if has_pose and mano_model is not None:
+        hand_pose = data["hand_pose"][frame_idx].astype(np.float32)  # (48,)
+        betas = data["betas"][frame_idx].astype(np.float32)          # (10,)
+        has_tsl = "hand_tsl" in data and "cTw" in data
+        if has_tsl:
+            hand_tsl = data["hand_tsl"][frame_idx].astype(np.float32)
+            cTw = data["cTw"][frame_idx].astype(np.float64)
+            vertices, joints = _mano_forward_clip(
+                mano_model, hand_pose, betas, hand_tsl, cTw, is_right)
+        else:
+            # Fallback: wrist-align to kp3d (no hand_tsl available)
+            vertices, joints = _mano_forward(mano_model, hand_pose, betas, is_right, kp3d)
+        faces = faces_right if is_right else faces_left
+        mesh_color = (200, 220, 255) if is_right else (255, 230, 200)
+        # Vertices are in camera space; project with full K matrix
+        mesh_img = _render_mesh_cpu_K(img_bgr, vertices, faces, K, mesh_color)
+    else:
+        mesh_img = img_bgr.copy()
+        if mano_model is None:
+            cv2.putText(mesh_img, "No MANO model", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        else:
+            cv2.putText(mesh_img, "No MANO", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    side_label = "R" if is_right else "L"
+    cv2.putText(skel_2d_img, "GT 2D", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(proj3d_img, "Proj 3D", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(error_img, "Error (G=GT R=Proj)", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+    cv2.putText(mesh_img, "MANO Mesh", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    for panel in [skel_2d_img, proj3d_img, error_img, mesh_img]:
+        cv2.putText(panel, side_label, (img_w - 20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    return np.concatenate([skel_2d_img, proj3d_img, error_img, mesh_img], axis=1)
 
 
 # ── Shared drawing helper ──────────────────────────────────────────
@@ -469,6 +725,8 @@ def main():
                         help="MANO model directory (only for webdataset format)")
     parser.add_argument("--max-tars", type=int, default=5,
                         help="Max tar files to scan (only for webdataset format)")
+    parser.add_argument("--img-dir", default=None,
+                        help="Image root directory (required for clipdataset format)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -502,6 +760,43 @@ def main():
                 saved += 1
             if (i + 1) % 20 == 0:
                 print(f"  {i + 1}/{len(picks)}")
+
+    elif fmt == "clipdataset":
+        if not args.img_dir:
+            print("ERROR: --img-dir is required for clipdataset format")
+            return
+
+        import smplx
+
+        mano_dir = os.path.normpath(args.mano_dir)
+        print(f"Loading MANO from {mano_dir}")
+        mano_model = {
+            "right": smplx.MANOLayer(model_path=mano_dir, is_rhand=True, flat_hand_mean=False),
+            "left": smplx.MANOLayer(model_path=mano_dir, is_rhand=False, flat_hand_mean=False),
+        }
+        faces_right = mano_model["right"].faces.astype(np.int32)
+        faces_left = faces_right[:, [0, 2, 1]]
+
+        print(f"Collecting ClipDataset samples from {args.src} ...")
+        samples = collect_samples_clipdataset(args.src, max_seqs=max(args.n * 2, 100))
+        print(f"Found {len(samples)} frame samples")
+        if not samples:
+            print("No samples found!")
+            return
+
+        picks = random.sample(samples, min(args.n, len(samples)))
+
+        saved = 0
+        for i, (label_path, frame_idx) in enumerate(picks):
+            img = render_frame_clipdataset(label_path, frame_idx, args.img_dir,
+                                           mano_model, faces_right, faces_left)
+            if img is not None:
+                seq_name = os.path.splitext(os.path.basename(label_path))[0]
+                out_path = os.path.join(args.out, f"clip_{dataset_name}_{seq_name}_f{frame_idx:04d}.jpg")
+                cv2.imwrite(out_path, img)
+                saved += 1
+            if (i + 1) % 10 == 0:
+                print(f"  [{i + 1}/{len(picks)}]")
 
     elif fmt == "webdataset":
         import smplx

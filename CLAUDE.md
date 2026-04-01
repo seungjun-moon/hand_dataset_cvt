@@ -68,6 +68,27 @@ FreiHAND images are already 224×224 hand crops. Use fixed `center=[112,112]`, `
 
 All 3D coordinates are in **meters**. Camera intrinsics use pixel units.
 
+## Mandatory: Verify New Datasets with Visualization
+
+After converting any new dataset (HDF5, WebDataset, or ClipDataset), **always** run the visualizer to verify MANO mesh alignment before considering the conversion done:
+
+```bash
+# ClipDataset format (requires --img-dir)
+python scripts/visualize.py --src <clip_label_dir> --img-dir <image_root> --n 20 --out outputs
+
+# WebDataset or HDF5 format
+python scripts/visualize.py --src <converted_dir> --n 20 --out outputs
+```
+
+Check the output images: the MANO mesh (panel 4) and projected 3D keypoints (panel 2) should align with the GT 2D keypoints (panel 1). The error panel (panel 3) should show <10px mean error. If MANO mesh is misaligned, investigate `hand_tsl`, `cTw`, and `flat_hand_mean` conventions for that dataset.
+
+### ClipDataset image root paths (--img-dir)
+
+- arctic: `../hand_tracking_ablation/_DATA/haptic_training_images/arctic/images`
+- ho3d: `../hand_tracking_ablation/_DATA/haptic_training_images/ho3d/HO3D_v3`
+- ho2o: `../hand_tracking_ablation/_DATA/haptic_training_images/ho2o/raw`
+- dexycb: `../hand_tracking_ablation/_DATA/haptic_training_images/dexycb`
+
 ## Key Files
 
 - `utils/io.py` — `write_egodex_hdf5()`, video encoding via ffmpeg

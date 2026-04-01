@@ -1,15 +1,21 @@
+# Pinned versions from ego_pipeline conda env (Python 3.10)
+#
 # Install torch first:
-#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-torch
-torchvision
+#   uv pip install torch==2.10.0+cu128 torchvision==0.25.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
 
 # Core
-numpy
-h5py
-opencv-python
-matplotlib
-scikit-image
-tqdm
-pyyaml
-webdataset
+numpy==1.26.4
+h5py==3.15.1
+opencv-python==4.11.0.86
+matplotlib==3.10.8
+scikit-image==0.25.2
+tqdm==4.67.2
+pyyaml==6.0.3
+pillow==12.1.0
+webdataset==1.0.2
+
+# Hand model
+smplx==0.1.28
 manopth @ git+https://github.com/hassony2/manopth.git
