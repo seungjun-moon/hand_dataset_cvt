@@ -15,10 +15,10 @@ Usage:
     python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/freihand-train --n 20
     python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/ho3d-train --n 20 --mano-dir /path/to/mano
     python scripts/visualize.py \
-    --src ../hand_tracking_ablation/_DATA/hamer_training_data/dataset_tars/reinterhand --n 50
+    --src ../hand_tracking_ablation/_DATA/hamer_training_data/dataset_tars_manotorch/reinterhand --n 50
 
-python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/haptic_training_label/hot3d/clip \
-    --img-dir ../hand_tracking_ablation/_DATA/haptic_training_images/hot3d/images/ --n 20
+python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/haptic_training_label/arctic/clip \
+    --img-dir ../hand_tracking_ablation/_DATA/haptic_training_images/arctic/images/ --n 20
 """
 
 import argparse
