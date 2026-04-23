@@ -5,20 +5,24 @@ Reads CONVERTED datasets (HDF5+MP4 or NPZ+JPG), HaMER WebDataset tars,
 or ClipDataset label directories (.data.pyd + per-sequence .pyd files).
 
 Automatically detects the dataset format:
-  - HDF5: *_label_*.hdf5 + *_video_*.mp4 (video sequences)
-  - NPZ:  *.npz + *.jpg (image-wise, e.g. FreiHAND)
   - WebDataset: *.tar containing {id}.jpg + {id}.data.pyd (HaMER format)
   - ClipDataset: *_clip.data.pyd master index + per-sequence .pyd files
                  (requires --img-dir for image root)
 
 Usage:
-    python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/freihand-train --n 20
+    python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/hamer_training_data/dataset_tars/dexycb --n 50
     python scripts/visualize.py --src ../hand_tracking_ablation/hamer_training_data/dataset_tars/ho3d-train --n 20 --mano-dir /path/to/mano
     python scripts/visualize.py \
     --src ../hand_tracking_ablation/_DATA/hamer_training_data/dataset_tars_manotorch/reinterhand --n 50
 
 python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/haptic_training_label/arctic/clip \
     --img-dir ../hand_tracking_ablation/_DATA/haptic_training_images/arctic/images/ --n 20
+
+python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/haptic_training_label/arctic/clip \
+    --video-dir ../hand_tracking_ablation/_DATA/haptic_training_videos/arctic --n 20
+
+python scripts/visualize.py --src ../hand_tracking_ablation/_DATA/haptic_training_label/dexycb/clip \
+    --video-dir ../hand_tracking_ablation/_DATA/haptic_training_videos/dexycb --n 20
 """
 
 import argparse
@@ -26,6 +30,7 @@ import os
 import pickle
 import random
 import sys
+import smplx
 import tarfile
 
 import cv2
@@ -62,7 +67,6 @@ DEFAULT_MANO_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "hand_tracking_ablation", "_DATA", "data", "mano"
 )
 
-
 def _joint_color(joint_idx: int):
     if joint_idx == 0:
         return WRIST_COLOR
@@ -82,45 +86,6 @@ def detect_format(src_dir: str) -> str:
         if fname.endswith(".tar"):
             return "webdataset"
 
-    # Check subdirectories for hdf5/npz
-    for cluster in sorted(os.listdir(src_dir)):
-        cluster_dir = os.path.join(src_dir, cluster)
-        if not os.path.isdir(cluster_dir):
-            continue
-        for fname in sorted(os.listdir(cluster_dir)):
-            if fname.endswith(".hdf5"):
-                return "hdf5"
-            if fname.endswith(".npz"):
-                return "npz"
-    return "hdf5"
-
-
-# ── HDF5 format ────────────────────────────────────────────────────
-def collect_samples_hdf5(src_dir: str):
-    """Collect HDF5 samples: (hdf5_path, video_path, frame_count, active_sides)."""
-    samples = []
-    for cluster in sorted(os.listdir(src_dir)):
-        cluster_dir = os.path.join(src_dir, cluster)
-        if not os.path.isdir(cluster_dir):
-            continue
-        for fname in sorted(os.listdir(cluster_dir)):
-            if not fname.endswith(".hdf5"):
-                continue
-            hdf5_path = os.path.join(cluster_dir, fname)
-            video_name = fname.replace("_label_", "_video_").replace(".hdf5", ".mp4")
-            video_path = os.path.join(cluster_dir, video_name)
-            if not os.path.exists(video_path):
-                continue
-            sides = get_active_sides(hdf5_path)
-            if not sides:
-                continue
-            with h5py.File(hdf5_path, "r") as f:
-                sample_key = f"{sides[0]}Hand"
-                n_frames = f[f"transforms/{sample_key}"].shape[0]
-            samples.append((hdf5_path, video_path, n_frames, sides))
-    return samples
-
-
 def read_video_frame(video_path: str, frame_idx: int):
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -129,96 +94,37 @@ def read_video_frame(video_path: str, frame_idx: int):
     return frame if ok else None
 
 
-def render_frame_hdf5(hdf5_path: str, video_path: str, frame_idx: int, sides: list):
-    """Render a single HDF5 frame with projected 3D keypoint skeleton."""
-    img = read_video_frame(video_path, frame_idx)
-    if img is None:
-        return None
-
-    with h5py.File(hdf5_path, "r") as f:
-        intrinsic = f["camera/intrinsic"][:]
-        cam_pose = f["transforms/camera"][frame_idx]
-
-        for side in sides:
-            kp_world = np.zeros((21, 3), dtype=np.float32)
-            for j, suffix in enumerate(HAND_JOINT_SUFFIXES):
-                name = f"{side}{suffix}"
-                kp_world[j] = f[f"transforms/{name}"][frame_idx, :3, 3]
-
-            kp_2d = project_3d_to_2d(kp_world, cam_pose, intrinsic)
-
-            h, w = img.shape[:2]
-            in_bounds = np.any(
-                (kp_2d[:, 0] >= -w) & (kp_2d[:, 0] < 2 * w) &
-                (kp_2d[:, 1] >= -h) & (kp_2d[:, 1] < 2 * h)
-            )
-            if not in_bounds:
-                continue
-
-            _draw_skeleton_on_image(img, kp_2d)
-
-            wrist_2d = kp_2d[0]
-            label_pos = (int(wrist_2d[0]) - 10, int(wrist_2d[1]) - 15)
-            cv2.putText(img, side[0].upper(), label_pos,
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        SIDE_COLORS[side], 2, cv2.LINE_AA)
-
-    return img
+# Cache frame maps across calls so we don't reload .frames.npy for every sample.
+_FRAME_MAP_CACHE = {}
 
 
-# ── NPZ format ─────────────────────────────────────────────────────
-def collect_samples_npz(src_dir: str, max_per_cluster: int = 10):
-    """Collect NPZ samples: (npz_path, img_path)."""
-    samples = []
-    for cluster in sorted(os.listdir(src_dir)):
-        cluster_dir = os.path.join(src_dir, cluster)
-        if not os.path.isdir(cluster_dir):
-            continue
-        npz_files = [f for f in os.listdir(cluster_dir) if f.endswith(".npz")]
-        if not npz_files:
-            continue
-        if len(npz_files) > max_per_cluster:
-            npz_files = random.sample(npz_files, max_per_cluster)
-        for fname in npz_files:
-            npz_path = os.path.join(cluster_dir, fname)
-            img_path = npz_path.replace(".npz", ".jpg")
-            if os.path.exists(img_path):
-                samples.append((npz_path, img_path))
-    return samples
+def _clip_imgname_to_video(imgname_rel: str, video_dir: str):
+    """Map a ClipDataset imgname to (video_path, frame_idx) via the .frames.npy sidecar.
 
+    Layout mirrors models_clip.datasets.video_dataset.VideoDataset:
+        imgname  's01/box_grab_01/0/00001.jpg'
+      → video    '<video_dir>/s01/box_grab_01/0.mp4'
+      → map      '<video_dir>/s01/box_grab_01/0.frames.npy'   {'00001.jpg': 0, ...}
+    """
+    parts = imgname_rel.split('/')
+    fname = parts[-1]
+    video_rel = '/'.join(parts[:-1]) + '.mp4'
+    video_path = os.path.join(video_dir, video_rel)
+    map_path = video_path[:-4] + '.frames.npy'
 
-def render_frame_npz(npz_path: str, img_path: str):
-    """Render a single NPZ image with projected 3D keypoint skeleton."""
-    img = cv2.imread(img_path)
-    if img is None:
-        return None
+    frame_map = _FRAME_MAP_CACHE.get(map_path)
+    if frame_map is None and os.path.exists(map_path):
+        frame_map = np.load(map_path, allow_pickle=True).item()
+        _FRAME_MAP_CACHE[map_path] = frame_map
 
-    data = np.load(npz_path, allow_pickle=True)
-    intrinsic = data["intrinsic"]
-    cam_ext = data["cam_ext"]
-    kp_world = data["kpt3d_world"]  # (21, 3)
-    side = str(data["side"])
+    if frame_map is not None and fname in frame_map:
+        return video_path, int(frame_map[fname])
 
-    kp_2d = project_3d_to_2d(kp_world, cam_ext, intrinsic)
-
-    h, w = img.shape[:2]
-    in_bounds = np.any(
-        (kp_2d[:, 0] >= -w) & (kp_2d[:, 0] < 2 * w) &
-        (kp_2d[:, 1] >= -h) & (kp_2d[:, 1] < 2 * h)
-    )
-    if not in_bounds:
-        return img
-
-    _draw_skeleton_on_image(img, kp_2d)
-
-    wrist_2d = kp_2d[0]
-    label_pos = (int(wrist_2d[0]) - 10, int(wrist_2d[1]) - 15)
-    cv2.putText(img, side[0].upper(), label_pos,
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                SIDE_COLORS[side], 2, cv2.LINE_AA)
-
-    return img
-
+    # Fallback: assume 1-indexed dense numbering (e.g. arctic '00001.jpg' -> 0)
+    digits = ''.join(c for c in os.path.splitext(fname)[0] if c.isdigit())
+    if not digits:
+        raise ValueError(f"Cannot parse frame index from {fname}")
+    return video_path, int(digits) - 1
 
 # ── WebDataset format ──────────────────────────────────────────────
 def collect_samples_webdataset(src_dir: str, max_tars: int = 5):
@@ -262,12 +168,22 @@ def _axis_angle_to_rotmat(aa: np.ndarray) -> np.ndarray:
 
 
 def _mano_forward(mano_model, hand_pose_aa, betas, is_right, kpts_3d=None):
-    """Run MANO forward pass from axis-angle params."""
-    import torch
-    model = mano_model["right"] if is_right else mano_model["left"]
+    """Run MANO forward pass from axis-angle params (MANO_RIGHT only).
 
-    global_orient_aa = hand_pose_aa[:3]
-    hand_pose_aa_15 = hand_pose_aa[3:48].reshape(15, 3)
+    Left hands are handled by mirroring: negate y/z of axis-angle, run MANO_RIGHT,
+    mirror output.x back. Mirrors the dataloader's fliplr convention, and avoids
+    the MANO_LEFT.pkl shapedirs sign bug (smplx#48).
+    """
+    import torch
+    model = mano_model["right"] if isinstance(mano_model, dict) else mano_model
+
+    hp = hand_pose_aa.astype(np.float64).copy()
+    if not is_right:
+        hp[1::3] *= -1
+        hp[2::3] *= -1
+
+    global_orient_aa = hp[:3]
+    hand_pose_aa_15 = hp[3:48].reshape(15, 3)
 
     global_orient = torch.from_numpy(_axis_angle_to_rotmat(global_orient_aa)).unsqueeze(0).unsqueeze(0)
     hand_pose = torch.stack(
@@ -278,50 +194,66 @@ def _mano_forward(mano_model, hand_pose_aa, betas, is_right, kpts_3d=None):
     with torch.no_grad():
         out = model(global_orient=global_orient, hand_pose=hand_pose, betas=betas_t, pose2rot=False)
 
-    vertices = out.vertices[0].numpy()
-    joints = out.joints[0].numpy()
+    vertices = out.vertices[0].numpy().astype(np.float64)
+    joints = out.joints[0].numpy().astype(np.float64)
+
+    if not is_right:
+        vertices[:, 0] *= -1
+        joints[:, 0] *= -1
 
     if kpts_3d is not None and kpts_3d[0, 3] > 0.5:
         offset = kpts_3d[0, :3] - joints[0]
         vertices = vertices + offset
         joints = joints + offset
 
-    return vertices, joints
+    return vertices.astype(np.float32), joints.astype(np.float32)
 
 
 def _mano_forward_clip(mano_model, hand_pose_aa, betas, hand_tsl, cTw, is_right):
     """Run MANO forward pass for ClipDataset: returns vertices/joints in camera space.
 
-    Uses hand_tsl for MANO translation, then applies cTw world-to-camera transform.
+    Only MANO_RIGHT is used. Left hands are handled the same way the training
+    dataloader does (models_clip/datasets/utils.py:409-440 fliplr_params + do_flip):
+    negate y/z of axis-angle, mirror hand_tsl.x, run MANO_RIGHT, mirror output.x back.
+    This avoids MANO_LEFT.pkl's shapedirs sign bug (smplx#48) entirely.
     """
     import torch
-    model = mano_model["right"] if is_right else mano_model["left"]
+    model = mano_model["right"] if isinstance(mano_model, dict) else mano_model
 
-    global_orient_aa = hand_pose_aa[:3]
-    hand_pose_aa_15 = hand_pose_aa[3:48].reshape(15, 3)
+    hp = hand_pose_aa.astype(np.float64).copy()
+    tsl = hand_tsl.astype(np.float64).copy()
+    if not is_right:
+        hp[1::3] *= -1   # negate y of each axis-angle (global + 15 joints)
+        hp[2::3] *= -1   # negate z of each axis-angle
+        tsl[0] *= -1     # mirror translation across world x
+
+    global_orient_aa = hp[:3]
+    hand_pose_aa_15 = hp[3:48].reshape(15, 3)
 
     global_orient = torch.from_numpy(_axis_angle_to_rotmat(global_orient_aa)).unsqueeze(0).unsqueeze(0)
     hand_pose = torch.stack(
         [torch.from_numpy(_axis_angle_to_rotmat(hand_pose_aa_15[j])) for j in range(15)]
     ).unsqueeze(0)
     betas_t = torch.from_numpy(betas).unsqueeze(0).float()
-    transl_t = torch.from_numpy(hand_tsl).unsqueeze(0).float()
+    transl_t = torch.from_numpy(tsl).unsqueeze(0).float()
 
     with torch.no_grad():
         out = model(global_orient=global_orient, hand_pose=hand_pose,
                     betas=betas_t, transl=transl_t, pose2rot=False)
 
-    verts_world = out.vertices[0].numpy()  # (778, 3) in world space
-    joints_world = out.joints[0].numpy()   # (16, 3) in world space
+    verts_world = out.vertices[0].numpy().astype(np.float64)   # (778, 3)
+    joints_world = out.joints[0].numpy().astype(np.float64)    # (16 or 21, 3)
 
-    # Transform world -> camera using cTw
+    if not is_right:
+        verts_world[:, 0] *= -1
+        joints_world[:, 0] *= -1
+
     R_cw = cTw[:3, :3].astype(np.float64)
     t_cw = cTw[:3, 3:4].astype(np.float64)
     verts_cam = (R_cw @ verts_world.T + t_cw).T.astype(np.float32)
     joints_cam = (R_cw @ joints_world.T + t_cw).T.astype(np.float32)
 
     return verts_cam, joints_cam
-
 
 def _estimate_focal(kpts_3d, kpts_2d, img_w, img_h=None):
     """Estimate focal length from 3D-2D correspondences assuming centered PP.
@@ -476,7 +408,6 @@ def _draw_webdataset_skeleton(image, kpts_2d):
         x = int(round(kpts_2d[i, 0]))
         y = int(round(kpts_2d[i, 1]))
         color = _joint_color(i)
-        print(x, y, kpts_2d[i])
         cv2.circle(img, (x, y), 4, color, -1, cv2.LINE_AA)
         cv2.circle(img, (x, y), 4, (0, 0, 0), 1, cv2.LINE_AA)
         p = PARENTS[i]
@@ -586,17 +517,34 @@ def collect_samples_clipdataset(src_dir: str, max_seqs: int = 50):
 
 
 def render_frame_clipdataset(label_path: str, frame_idx: int, img_dir: str,
-                             mano_model=None, faces_right=None, faces_left=None):
-    """Render a ClipDataset frame with GT 2D skeleton, projected 3D skeleton, and MANO mesh."""
+                             mano_model=None, faces_right=None, faces_left=None,
+                             video_dir: str = None):
+    """Render a ClipDataset frame with GT 2D skeleton, projected 3D skeleton, and MANO mesh.
+
+    Frames are read either from individual jpg files under ``img_dir`` or, when
+    ``video_dir`` is given, from per-sequence mp4 files using the ``.frames.npy``
+    sidecar map (matching ``models_clip.datasets.video_dataset``).
+    """
     data = np.load(label_path, allow_pickle=True)
 
     imgname_raw = data["imgname"][frame_idx]
     imgname_rel = _decode_clipdataset_imgname(imgname_raw)
-    img_path = os.path.join(img_dir, imgname_rel)
-    img_bgr = cv2.imread(img_path)
-    if img_bgr is None:
-        print(f"  Cannot read image: {img_path}")
-        return None
+    if video_dir is not None:
+        try:
+            video_path, v_idx = _clip_imgname_to_video(imgname_rel, video_dir)
+        except Exception as e:
+            print(f"  Cannot map {imgname_rel} to video: {e}")
+            return None
+        img_bgr = read_video_frame(video_path, v_idx)
+        if img_bgr is None:
+            print(f"  Cannot read frame {v_idx} from {video_path}")
+            return None
+    else:
+        img_path = os.path.join(img_dir, imgname_rel)
+        img_bgr = cv2.imread(img_path)
+        if img_bgr is None:
+            print(f"  Cannot read image: {img_path}")
+            return None
 
     kp2d = data["hand_keypoints_2d"][frame_idx]  # (21, 3)
     kp3d = data["hand_keypoints_3d"][frame_idx]  # (21, 4)
@@ -726,7 +674,12 @@ def main():
     parser.add_argument("--max-tars", type=int, default=5,
                         help="Max tar files to scan (only for webdataset format)")
     parser.add_argument("--img-dir", default=None,
-                        help="Image root directory (required for clipdataset format)")
+                        help="Image root directory for clipdataset format "
+                             "(required unless --video-dir is given)")
+    parser.add_argument("--video-dir", default=None,
+                        help="Video root directory for clipdataset format. If given, "
+                             "frames are decoded from per-sequence mp4s + .frames.npy "
+                             "sidecars instead of individual image files.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -736,43 +689,26 @@ def main():
     print(f"Detected format: {fmt}")
 
     os.makedirs(args.out, exist_ok=True)
-    dataset_name = os.path.basename(os.path.normpath(args.src))
-
-    if fmt == "npz":
-        print("Collecting NPZ samples...")
-        samples = collect_samples_npz(args.src)
-        print(f"Found {len(samples)} images with hand annotations")
-        if not samples:
-            print("No samples found!")
+    
+    if fmt == "clipdataset":
+        if not args.img_dir and not args.video_dir:
+            print("ERROR: --img-dir or --video-dir is required for clipdataset format")
             return
 
-        picks = random.sample(samples, min(args.n, len(samples)))
-
-        print(f"Rendering {len(picks)} frames...")
-        saved = 0
-        for i, (npz_path, img_path) in enumerate(picks):
-            img = render_frame_npz(npz_path, img_path)
-            if img is not None:
-                cluster = os.path.basename(os.path.dirname(npz_path))
-                name = os.path.basename(npz_path).replace(".npz", "")
-                out_path = os.path.join(args.out, f"{dataset_name}_{cluster}_{name}.jpg")
-                cv2.imwrite(out_path, img)
-                saved += 1
-            if (i + 1) % 20 == 0:
-                print(f"  {i + 1}/{len(picks)}")
-
-    elif fmt == "clipdataset":
-        if not args.img_dir:
-            print("ERROR: --img-dir is required for clipdataset format")
-            return
-
-        import smplx
+        datasets = ['arctic', 'dexycb', 'ho2o', 'ho3d', 'hot3d', 'interhand']
+        
+        for dataset in datasets:
+            if dataset in args.src:
+                dataset_name = dataset
+                pass
 
         mano_dir = os.path.normpath(args.mano_dir)
         print(f"Loading MANO from {mano_dir}")
+        # MANO_RIGHT only; left hands are mirrored inside _mano_forward_clip /
+        # _mano_forward (same trick the training dataloader uses) so MANO_LEFT.pkl
+        # — which has the smplx#48 shapedirs bug — is never loaded.
         mano_model = {
             "right": smplx.MANOLayer(model_path=mano_dir, is_rhand=True, flat_hand_mean=False),
-            "left": smplx.MANOLayer(model_path=mano_dir, is_rhand=False, flat_hand_mean=False),
         }
         faces_right = mano_model["right"].faces.astype(np.int32)
         faces_left = faces_right[:, [0, 2, 1]]
@@ -789,23 +725,30 @@ def main():
         saved = 0
         for i, (label_path, frame_idx) in enumerate(picks):
             img = render_frame_clipdataset(label_path, frame_idx, args.img_dir,
-                                           mano_model, faces_right, faces_left)
+                                           mano_model, faces_right, faces_left,
+                                           video_dir=args.video_dir)
             if img is not None:
-                seq_name = os.path.splitext(os.path.basename(label_path))[0]
-                out_path = os.path.join(args.out, f"clip_{dataset_name}_{seq_name}_f{frame_idx:04d}.jpg")
+                if dataset_name == 'arctic':
+                    el = label_path.split(os.sep)
+                    seq_name = '_'.join([el[-4], el[-3], el[-2], os.path.splitext(el[-1])[0]])
+                    print(seq_name)
+                else:
+                    seq_name = os.path.splitext(os.path.basename(label_path))[0]
+                out_path = os.path.join(args.out, f"{dataset_name}_{seq_name}_f{frame_idx:04d}.jpg")
                 cv2.imwrite(out_path, img)
                 saved += 1
             if (i + 1) % 10 == 0:
                 print(f"  [{i + 1}/{len(picks)}]")
 
     elif fmt == "webdataset":
-        import smplx
-
+        dataset_name = os.path.basename(os.path.normpath(args.src))
         mano_dir = os.path.normpath(args.mano_dir)
         print(f"Loading MANO from {mano_dir}")
+        # MANO_RIGHT only; left hands are mirrored inside _mano_forward_clip /
+        # _mano_forward (same trick the training dataloader uses) so MANO_LEFT.pkl
+        # — which has the smplx#48 shapedirs bug — is never loaded.
         mano_model = {
             "right": smplx.MANOLayer(model_path=mano_dir, is_rhand=True, flat_hand_mean=False),
-            "left": smplx.MANOLayer(model_path=mano_dir, is_rhand=False, flat_hand_mean=False),
         }
         faces_right = mano_model["right"].faces.astype(np.int32)
         faces_left = faces_right[:, [0, 2, 1]]
