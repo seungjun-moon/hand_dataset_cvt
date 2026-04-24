@@ -471,6 +471,112 @@ def render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_
     return np.concatenate([skel_img, proj3d_img, mesh_img], axis=1)
 
 
+def _bbox_to_affine(center, scale, out_size, rescale=1.0):
+    """Build a 2x3 affine from the label bbox (center, scale) to an out_size patch.
+
+    HaMER convention: bbox_size_px = scale * 200. Crop is forced to be square by
+    taking max(scale_x, scale_y). An extra ``rescale`` factor can be applied to
+    match how HaMER's dataloader expands the bbox at training time (typically
+    1.0 here, since the labeled bbox is usually already padded).
+    """
+    bbox_w = float(scale[0]) * 200.0 * rescale
+    bbox_h = float(scale[1]) * 200.0 * rescale
+    side_len = max(bbox_w, bbox_h)
+    s = out_size / side_len
+    A = np.array([
+        [s, 0, -s * float(center[0]) + out_size / 2.0],
+        [0, s, -s * float(center[1]) + out_size / 2.0],
+    ], dtype=np.float32)
+    return A, side_len
+
+
+def render_frame_webdataset_crop(tar_path, base_name, mano_model, faces_right, faces_left,
+                                 out_size=256, rescale=1.0):
+    """WebDataset variant that crops each panel to the label's bbox.
+
+    Panels (all out_size x out_size except overview):
+      0: full image with the bbox drawn (resized to match out_size height)
+      1: cropped 2D skeleton (GT keypoints_2d warped into the crop)
+      2: cropped projected 3D skeleton
+      3: cropped MANO mesh
+    """
+    try:
+        img_bgr, ann = _load_webdataset_sample(tar_path, base_name)
+    except Exception as e:
+        print(f"  Skip {base_name}: {e}")
+        return None
+
+    img_h, img_w = img_bgr.shape[:2]
+    center = np.asarray(ann["center"], dtype=np.float64)
+    scale = np.asarray(ann["scale"], dtype=np.float64)
+    A, side_len = _bbox_to_affine(center, scale, out_size, rescale)
+
+    is_right = bool(ann["right"] > 0.5)
+    has_pose = bool(ann["has_hand_pose"] > 0.5)
+    hand_pose = ann["hand_pose"]
+    betas = ann["betas"]
+    kpts_2d = ann["keypoints_2d"]
+    kpts_3d = ann["keypoints_3d"]
+
+    # Panel 0: overview with bbox drawn on full image, resized to height=out_size
+    overview = img_bgr.copy()
+    cx0, cy0 = float(center[0]), float(center[1])
+    tl = (int(round(cx0 - side_len / 2.0)), int(round(cy0 - side_len / 2.0)))
+    br = (int(round(cx0 + side_len / 2.0)), int(round(cy0 + side_len / 2.0)))
+    cv2.rectangle(overview, tl, br, (0, 255, 255), 2)
+    ov_w = max(1, int(round(img_w * out_size / float(img_h))))
+    overview = cv2.resize(overview, (ov_w, out_size))
+    cv2.putText(overview, "bbox", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                (0, 255, 255), 1)
+
+    # Panel 1: 2D skeleton drawn on full image then warped
+    skel_full = _draw_webdataset_skeleton(img_bgr, kpts_2d)
+    skel_crop = cv2.warpAffine(skel_full, A, (out_size, out_size))
+
+    # Panel 2: projected 3D keypoints
+    proj3d_full = img_bgr.copy()
+    valid_3d = kpts_3d[:, 3] > 0.5
+    if valid_3d.any():
+        focal = _estimate_focal(kpts_3d, kpts_2d, img_w, img_h)
+        ppx, ppy = img_w / 2.0, img_h / 2.0
+        proj_2d = np.zeros((21, 3), dtype=np.float32)
+        for j in range(21):
+            if kpts_3d[j, 3] > 0.5:
+                z = max(kpts_3d[j, 2], 1e-4)
+                proj_2d[j, 0] = focal * kpts_3d[j, 0] / z + ppx
+                proj_2d[j, 1] = focal * kpts_3d[j, 1] / z + ppy
+                proj_2d[j, 2] = 1.0
+        proj3d_full = _draw_webdataset_skeleton(img_bgr, proj_2d)
+    proj3d_crop = cv2.warpAffine(proj3d_full, A, (out_size, out_size))
+
+    # Panel 3: MANO mesh
+    if has_pose:
+        vertices, _ = _mano_forward(mano_model, hand_pose, betas, is_right, kpts_3d)
+        focal = _estimate_focal(kpts_3d, kpts_2d, img_w, img_h)
+        cam_t = np.zeros(3, dtype=np.float32)
+        faces = faces_right if is_right else faces_left
+        mesh_color = (200, 220, 255) if is_right else (255, 230, 200)
+        mesh_full = _render_mesh_cpu(img_bgr, vertices, faces, cam_t, focal, mesh_color)
+    else:
+        mesh_full = img_bgr.copy()
+        cv2.putText(mesh_full, "No MANO", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    mesh_crop = cv2.warpAffine(mesh_full, A, (out_size, out_size))
+
+    side_label = "R" if is_right else "L"
+    cv2.putText(skel_crop, "2D KP (crop)", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(proj3d_crop, "Proj 3D (crop)", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(mesh_crop, "MANO (crop)", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    for panel in (skel_crop, proj3d_crop, mesh_crop):
+        cv2.putText(panel, side_label, (out_size - 20, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    return np.concatenate([overview, skel_crop, proj3d_crop, mesh_crop], axis=1)
+
+
 # ── ClipDataset format ────────────────────────────────────────────
 
 def _decode_clipdataset_imgname(s):
@@ -680,6 +786,14 @@ def main():
                         help="Video root directory for clipdataset format. If given, "
                              "frames are decoded from per-sequence mp4s + .frames.npy "
                              "sidecars instead of individual image files.")
+    parser.add_argument("--crop", action="store_true",
+                        help="For webdataset format: crop each panel to the labeled "
+                             "bbox (center, scale). Output panels are square.")
+    parser.add_argument("--crop-size", type=int, default=256,
+                        help="Crop output size in pixels (default: 256)")
+    parser.add_argument("--crop-rescale", type=float, default=1.0,
+                        help="Extra expansion on the labeled bbox before cropping "
+                             "(default: 1.0 — use the bbox as-is)")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -763,11 +877,19 @@ def main():
         picks = random.sample(samples, min(args.n, len(samples)))
 
         saved = 0
+        tag = "crop" if args.crop else "full"
         for i, (tar_path, base_name) in enumerate(picks):
-            img = render_frame_webdataset(tar_path, base_name, mano_model, faces_right, faces_left)
+            if args.crop:
+                img = render_frame_webdataset_crop(
+                    tar_path, base_name, mano_model, faces_right, faces_left,
+                    out_size=args.crop_size, rescale=args.crop_rescale)
+            else:
+                img = render_frame_webdataset(
+                    tar_path, base_name, mano_model, faces_right, faces_left)
             if img is not None:
                 sample_id = os.path.basename(base_name)
-                out_path = os.path.join(args.out, f"webdataset_{dataset_name}_{sample_id}.jpg")
+                out_path = os.path.join(
+                    args.out, f"webdataset_{dataset_name}_{tag}_{sample_id}.jpg")
                 cv2.imwrite(out_path, img)
                 saved += 1
             if (i + 1) % 10 == 0:

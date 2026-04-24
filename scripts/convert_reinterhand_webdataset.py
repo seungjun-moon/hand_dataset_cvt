@@ -52,6 +52,10 @@ from utils.image_utils import bbox_from_keypoints, expand_to_square, project_3d_
 
 SAMPLES_PER_SHARD = 1000
 DATASET_PREFIX = "reinterhand"
+# HaMER-format convention used by other tars in this repo (arctic, interhand26m):
+# the stored `scale` embeds a 3× expansion over the tight keypoint bbox so the
+# dataloader's rescale_factor produces consistent crops across datasets.
+BBOX_EXPANSION = 3.0
 DEFAULT_MANO_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "hand_tracking_ablation", "_DATA", "data", "mano"
 )
@@ -206,7 +210,7 @@ def extract_hand_samples(hdf5_path, video_path, hand_mean_poses):
                 (sq_bbox[0] + sq_bbox[2]) / 2.0,
                 (sq_bbox[1] + sq_bbox[3]) / 2.0,
             ], dtype=np.float64)
-            bbox_size = float(sq_bbox[2] - sq_bbox[0])
+            bbox_size = float(sq_bbox[2] - sq_bbox[0]) * BBOX_EXPANSION
             scale = np.array([bbox_size / 200.0, bbox_size / 200.0], dtype=np.float64)
 
             # Convert MANO params to axis-angle

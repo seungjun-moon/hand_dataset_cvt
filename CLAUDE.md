@@ -62,7 +62,31 @@ Reorder mapping (FK → standard): `[0, 13,14,15,16, 1,2,3,17, 4,5,6,18, 10,11,1
 
 ### WebDataset center/scale
 
-FreiHAND images are already 224×224 hand crops. Use fixed `center=[112,112]`, `scale=[1.12,1.12]` (=224/200), not computed from keypoint bounding boxes.
+HaMER convention: `bbox_size_px = scale * 200`. The bbox is always square (we
+take `max(scale_x, scale_y)` on read). **The stored `scale` must embed a 3×
+expansion over the tight 2D keypoint bbox** so all datasets feed a HaMER
+dataloader consistently. Converter pattern:
+
+```python
+sq_bbox = expand_to_square(bbox_from_keypoints(kp2d))
+bbox_size = (sq_bbox[2] - sq_bbox[0]) * 3.0   # <- 3× expansion
+scale = np.array([bbox_size / 200.0, bbox_size / 200.0])
+```
+
+Empirical check: `max(scale) * 200 / max(tight_kp_bbox)` should equal ~3.0 across
+samples. Confirmed for `arctic-train`, `interhand26m-train`, `reinterhand`
+(patched 2026-04-24 — see `scripts/patch_reinterhand_scale.py`; the original
+converter used 1× and produced overly tight crops).
+
+Exceptions:
+- **FreiHAND**: images are already 224×224 hand crops. Use fixed `center=[112,112]`,
+  `scale=[1.12,1.12]` (= 224/200), not computed from keypoints.
+
+Visualize the stored bbox with:
+```bash
+python scripts/visualize.py --src <tar_dir> --crop --n 12 --out outputs/bbox_crop/<name>
+```
+Hand should sit centered with roughly equal padding on all sides across datasets.
 
 ### Units
 

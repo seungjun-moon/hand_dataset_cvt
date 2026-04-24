@@ -87,6 +87,21 @@ def load_hand_poses(jsonl_path):
     return poses
 
 
+def load_mask_csv(csv_path, stream_id_str):
+    """Load a HOT3D mask CSV. Returns set of timestamp_ns where mask is True
+    for the given stream_id. Masks are per (ts, stream_id), not per hand.
+    """
+    ok = set()
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["stream_id"] != stream_id_str:
+                continue
+            if row["mask"].strip().lower() == "true":
+                ok.add(int(row["timestamp[ns]"]))
+    return ok
+
+
 def load_box2d_hands(csv_path):
     """Load 2D hand bounding boxes. Returns dict: (stream_id, ts) -> {hand_idx: bbox}."""
     boxes = {}
@@ -200,15 +215,12 @@ def batch_mano_fk(mano_dir, all_betas, all_pca, all_wrist_R, all_wrist_t, is_rig
         num_pca_comps=all_pca.shape[1],
         flat_hand_mean=False,
     )
-
-    # Fix left hand shapedirs bug (https://github.com/vchoutas/smplx/issues/48)
+    # Apply the standard smplx MANO_LEFT.pkl shapedirs fix (smplx#48) for the
+    # left hand. Matches ho2o's label convention and the official HOT3D loader
+    # (hot3d/data_loaders/mano_layer.py). Without this, every left-hand label
+    # is shifted by ~1 cm per unit of betas[0] (up to 24 mm on extreme subjects).
     if not is_right:
-        right_path = os.path.join(mano_dir, "MANO_RIGHT.pkl")
-        mano_right = smplx.create(right_path, "mano", use_pca=True, is_rhand=True,
-                                  num_pca_comps=all_pca.shape[1], flat_hand_mean=False)
-        if torch.sum(torch.abs(
-                mano_layer.shapedirs[:, 0, :] - mano_right.shapedirs[:, 0, :])) < 1:
-            mano_layer.shapedirs[:, 0, :] *= -1
+        mano_layer.shapedirs.data[:, 0, :] *= -1
 
     global_orient = np.zeros((N, 3), dtype=np.float32)
     for i in range(N):
@@ -271,6 +283,15 @@ def convert_sequence(src_dir, dst_dir, img_dir, mano_dir, clip_len, stream_id_st
     box2d = load_box2d_hands(os.path.join(src_dir, "box2d_hands.csv"))
     cam_model = load_camera_model(os.path.join(src_dir, "camera_models.json"), stream_id_str)
 
+    # HOT3D per-frame quality masks (per stream, not per hand).
+    # qa_pass is the strict gate the dataset authors use; pose_available/visible
+    # are cheap extras that mostly agree with it.
+    masks_dir = os.path.join(src_dir, "masks")
+    qa_ok = load_mask_csv(os.path.join(masks_dir, "mask_qa_pass.csv"), stream_id_str)
+    pose_ok = load_mask_csv(os.path.join(masks_dir, "mask_hand_pose_available.csv"), stream_id_str)
+    vis_ok = load_mask_csv(os.path.join(masks_dir, "mask_hand_visible.csv"), stream_id_str)
+    print(f"  Masks: qa_pass={len(qa_ok)} pose_avail={len(pose_ok)} hand_visible={len(vis_ok)}")
+
     # Build static transforms
     T_dc = build_T_device_camera(cam_model)     # device <- camera
     T_cd = np.linalg.inv(T_dc)                  # camera <- device
@@ -310,30 +331,37 @@ def convert_sequence(src_dir, dst_dir, img_dir, mano_dir, clip_len, stream_id_st
         mean_pose = mean_right if is_right_hand else mean_left
 
         # Step 1: Collect valid frame indices
-        # Require: hand pose + bbox + SLAM coverage + bbox within image + sufficient visibility
+        # Require: hand pose + bbox + SLAM coverage + bbox within image + sufficient
+        # visibility + HOT3D quality masks (qa_pass, pose_available, hand_visible).
         valid_frames = []
+        drop = defaultdict(int)
         for frame_i, ts in enumerate(timestamps):
             if ts not in hand_poses:
-                continue
+                drop["no_pose_ts"] += 1; continue
             h_key = str(hand_idx)
             if h_key not in hand_poses[ts]:
-                continue
+                drop["no_pose_hand"] += 1; continue
             box_key = (stream_id_str, ts)
             if box_key not in box2d or hand_idx not in box2d[box_key]:
-                continue
-            # Require SLAM coverage
+                drop["no_bbox"] += 1; continue
             if ts not in slam_traj:
-                continue
+                drop["no_slam"] += 1; continue
             bbox = box2d[box_key][hand_idx]
-            # Require sufficient visibility
             if bbox["visibility"] < min_visibility:
-                continue
-            # Require bbox center within image
+                drop["low_vis"] += 1; continue
             cx = (bbox["x_min"] + bbox["x_max"]) / 2
             cy = (bbox["y_min"] + bbox["y_max"]) / 2
             if cx < 0 or cx > img_size or cy < 0 or cy > img_size:
-                continue
+                drop["bbox_out"] += 1; continue
+            if ts not in qa_ok:
+                drop["qa_fail"] += 1; continue
+            if ts not in pose_ok:
+                drop["pose_unavail"] += 1; continue
+            if ts not in vis_ok:
+                drop["not_visible"] += 1; continue
             valid_frames.append((frame_i, ts))
+        if drop:
+            print(f"    drop counts: {dict(drop)}")
 
         n_valid = len(valid_frames)
         n_clips = n_valid // clip_len
@@ -398,14 +426,17 @@ def convert_sequence(src_dir, dst_dir, img_dir, mano_dir, clip_len, stream_id_st
             kp2d = project_3d_to_2d(joints_cam, K)
             all_kp2d[i] = kp2d
 
-            # Compute center/scale from projected keypoints in undistorted image
+            # Compute center/scale from projected keypoints in undistorted image.
+            # Matches arctic/dexycb/ho3d/ho2o haptic convention: scale*200 =
+            # 3x kp span, so the dataloader's default rescale_factor=2 yields a
+            # final crop of 6x kp_span.
             valid = kp2d[:, 2] > 0.5
             if valid.any():
                 pts = kp2d[valid, :2]
                 x_min, y_min = pts.min(axis=0)
                 x_max, y_max = pts.max(axis=0)
                 all_center[i] = [(x_min + x_max) / 2, (y_min + y_max) / 2]
-                s = max(x_max - x_min, y_max - y_min) / 200.0
+                s = 3.0 * max(x_max - x_min, y_max - y_min) / 200.0
                 all_scale[i] = [s, s]
 
         # 3D keypoints in camera frame with confidence
